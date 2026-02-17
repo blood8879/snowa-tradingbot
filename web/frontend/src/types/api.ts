@@ -1,0 +1,367 @@
+// ═══════════════════════════════════════════════
+// API Response Types — matches Python route responses exactly
+// ═══════════════════════════════════════════════
+
+// ── GET /api/status ──────────────────────────────
+
+export interface StatusResponse {
+  mode: string;
+  market_filter: string;
+  market_filter_pass: boolean;
+  spy: {
+    close: number | null;
+    sma200: number | null;
+  };
+  positions: number;
+  units: number;
+  account_equity: number;
+  cash_balance: number;
+  positions_value: number;
+  ws_status: string;
+}
+
+// ── GET /api/positions ───────────────────────────
+
+export interface Unit {
+  id: number;
+  unit_number: number;
+  entry_price: number;
+  shares: number;
+  entry_stop_price: number;
+  current_stop_price: number;
+  entered_at: string;
+}
+
+export interface Position {
+  id: number;
+  ticker: string;
+  system: string;
+  status: string;
+  total_shares: number;
+  total_cost: number;
+  avg_entry_price: number;
+  current_stop_price: number;
+  n_at_entry: number;
+  sector: string | null;
+  industry: string | null;
+  opened_at: string;
+  closed_at: string | null;
+  close_reason: string | null;
+  realized_pnl: number | null;
+  units: Unit[];
+}
+
+export interface BrokerPosition {
+  ticker: string;
+  exchange: string;
+  quantity: number;
+  avg_price: number;
+  current_price: number;
+  eval_amount: number;
+  pnl_amount: number;
+  pnl_pct: number;
+  currency: string;
+}
+
+export interface PositionsResponse {
+  positions: Position[];
+  broker_positions: BrokerPosition[];
+  count: number;
+  broker_count: number;
+}
+
+// ── GET /api/watchlist ───────────────────────────
+
+export interface WatchlistStock {
+  ticker: string;
+  added_date: string;
+  last_screened: string;
+  quarterly_eps_growth: number | null;
+  annual_eps_cagr: number | null;
+  rs_rating: number | null;
+  institutional_holders: number | null;
+  institutional_change_pct: number | null;
+  custom_composite_score: number | null;
+  minervini_pass: boolean;
+  sector: string | null;
+  industry: string | null;
+  avg_daily_volume: number | null;
+  market_cap: number | null;
+  status: string;
+  latest_price: number | null;
+  n_value: number | null;
+  avg_volume_50d: number | null;
+}
+
+export interface WatchlistResponse {
+  watchlist: WatchlistStock[];
+  count: number;
+}
+
+// ── GET /api/trades ──────────────────────────────
+
+export interface Trade {
+  id: number;
+  broker_order_id: string | null;
+  ticker: string;
+  side: string;
+  order_type: string;
+  requested_shares: number;
+  requested_price: number;
+  filled_shares: number;
+  filled_price: number | null;
+  status: string;
+  created_at: string;
+  updated_at: string;
+  filled_at: string | null;
+  notes: string | null;
+}
+
+export interface TradesResponse {
+  trades: Trade[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+// ── GET /api/pnl ─────────────────────────────────
+
+export interface PnlDataPoint {
+  period: string;
+  start: string;
+  end: string;
+  pnl: number;
+  equity: number;
+  max_drawdown_pct: number;
+  entries: number;
+  exits: number;
+  stop_losses: number;
+}
+
+export interface PnlResponse {
+  period: string;
+  data: PnlDataPoint[];
+  summary: {
+    total_pnl: number;
+    max_equity: number;
+    max_drawdown_pct: number;
+    data_points: number;
+  };
+}
+
+// ── GET /api/journal ─────────────────────────────
+
+export interface JournalTrade {
+  ticker: string;
+  system: string;
+  realized_pnl: number;
+  opened_at: string;
+  closed_at: string;
+  close_reason: string;
+  avg_entry_price: number;
+  stop_price: number;
+  total_shares: number;
+  risk_per_share: number;
+}
+
+export interface JournalResponse {
+  month: string;
+  stats: {
+    total_trades: number;
+    winners: number;
+    losers: number;
+    win_rate_pct: number;
+    avg_win: number;
+    avg_loss: number;
+    risk_reward_ratio: number;
+    max_drawdown_pct: number;
+    monthly_pnl: number;
+    min_equity: number;
+    max_equity: number;
+  };
+  trades: JournalTrade[];
+}
+
+// ── GET /api/diary ───────────────────────────────
+
+export interface JournalContext {
+  type?: string;
+  system?: string;
+  breakout_level?: number | null;
+  atr?: number;
+  stop_price?: number;
+  risk_per_share?: number;
+  market_filter?: boolean;
+  rs_rating?: number | null;
+  composite_score?: number | null;
+  account_equity?: number;
+  position_size_pct?: number;
+  unit_number?: number;
+  new_stop?: number;
+  prev_stop?: number;
+  pyramid_interval?: number;
+  trigger_price?: number;
+  avg_entry_price?: number;
+  atr_at_entry?: number;
+  units_held?: number;
+  total_shares?: number;
+  loss_pct?: number;
+  exit_level?: number | null;
+  exit_reason?: string;
+  pnl_pct?: number;
+  error?: string;
+  raw?: string;
+}
+
+export interface DiaryEntry {
+  order_id: number;
+  ticker: string;
+  side: string;
+  order_type: string;
+  requested_shares: number;
+  requested_price: number;
+  filled_shares: number;
+  filled_price: number | null;
+  status: string;
+  created_at: string;
+  filled_at: string | null;
+  context: JournalContext | null;
+  position_system: string | null;
+  position_avg_entry: number | null;
+  position_pnl: number | null;
+  close_reason: string | null;
+  position_opened: string | null;
+  position_closed: string | null;
+}
+
+export interface DiaryResponse {
+  entries: DiaryEntry[];
+  total: number;
+  limit: number;
+  offset: number;
+  available_tickers: string[];
+}
+
+// ── GET /api/logs ───────────────────────────────
+
+export interface LogEntry {
+  event: string;
+  level?: string;
+  timestamp?: string;
+  [key: string]: unknown;
+}
+
+export interface BotEvent {
+  id: number;
+  timestamp: string;
+  level: string;
+  event: string;
+  module: string | null;
+  ticker: string | null;
+  details: string | null;
+}
+
+export interface LogsResponse {
+  logs: LogEntry[];
+  bot_events: BotEvent[];
+  total_log_lines: number;
+  log_file: string;
+  log_file_exists: boolean;
+}
+
+// ── GET /api/bot-health ─────────────────────────
+
+export interface DailyLogSummary {
+  date: string;
+  account_equity: number | null;
+  daily_pnl: number | null;
+  daily_pnl_pct: number | null;
+  total_positions: number | null;
+  total_units: number | null;
+  entries_count: number | null;
+  exits_count: number | null;
+  stop_losses_count: number | null;
+}
+
+export interface BotHealthResponse {
+  health_status: 'running' | 'stopped' | 'degraded';
+  mode: string;
+  ws_status: string;
+  market_filter: string;
+  bot_started_at: string | null;
+  last_heartbeat: string | null;
+  last_screening: string | null;
+  last_error: string | null;
+  open_positions: number;
+  active_watchlist: number;
+  pending_orders: number;
+  recent_error_count: number;
+  last_daily_log: DailyLogSummary | null;
+  latest_price_date: string | null;
+  latest_fundamental_date: string | null;
+  latest_screening_date: string | null;
+  live_equity: number | null;
+  live_cash: number | null;
+}
+
+// ── GET /api/alerts/near-entry ──────────────────
+
+export interface NearEntryAlert {
+  ticker: string;
+  latest_price: number;
+  donchian_upper_20: number;
+  donchian_upper_55: number | null;
+  donchian_lower_20: number;
+  proximity_pct_20: number;
+  proximity_pct_55: number | null;
+  already_broken_20: boolean;
+  already_broken_55: boolean;
+  signal_type: 'S1' | 'S2' | 'S1+S2' | 'none';
+  alert_level: 'breakout' | 'imminent' | 'close' | 'normal';
+  rs_rating: number | null;
+  composite_score: number | null;
+  sma_20: number;
+}
+
+export interface NearEntryAlertsResponse {
+  alerts: NearEntryAlert[];
+  total: number;
+  imminent_count: number;
+  breakout_count: number;
+}
+
+// ── GET /api/prices/realtime ────────────────────
+
+export interface RealtimePriceData {
+  price: number;
+  change_pct: number;
+  volume: number | null;
+  updated_at: string;
+}
+
+export interface RealtimePricesResponse {
+  prices: Record<string, RealtimePriceData>;
+  cached: boolean;
+}
+
+// ── GET /api/alerts/near-exit ──────────────────
+
+export interface ExitAlert {
+  ticker: string;
+  position_side: string;
+  entry_price: number;
+  current_price: number;
+  unrealized_pnl_pct: number;
+  system: string;
+  donchian_lower_10: number;
+  donchian_lower_20: number;
+  exit_proximity_pct: number;
+  exit_level: 'critical' | 'warning' | 'safe';
+}
+
+export interface ExitAlertsResponse {
+  alerts: ExitAlert[];
+  total: number;
+  critical_count: number;
+  warning_count: number;
+}
