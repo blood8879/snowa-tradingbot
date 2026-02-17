@@ -5,12 +5,13 @@ APP_DIR="/home/ubuntu/apps/snowa_tradingbot"
 VENV="$APP_DIR/.venv"
 
 cd "$APP_DIR"
+source "$VENV/bin/activate"
 
-echo "=== CANSLIM Screening Pipeline ==="
+echo "=== SNOWA Data Update ==="
 echo "Starting: $(date)"
 echo ""
 
-"$VENV/bin/python" -m scripts.run_screening "$@"
+python -m scripts.initial_data_load --mode all "$@"
 
 echo ""
 echo "Finished: $(date)"
