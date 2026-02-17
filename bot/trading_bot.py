@@ -370,10 +370,8 @@ class TradingBot:
         try:
             await self._intraday.start()
 
-            # 구독할 종목 목록 (사전 계산된 시그널이 있는 종목)
             tickers = list(self._intraday.precomputed_signals.keys())
 
-            # 보유 중인 포지션 종목도 추가
             open_positions = await self._position_mgr.get_open_positions()
             for pos in open_positions:
                 if pos.ticker not in tickers:
@@ -383,11 +381,11 @@ class TradingBot:
                 logger.warning("intraday_no_tickers")
                 return
 
-            # WebSocket 을 별도 태스크로 시작
             self._ws_task = asyncio.create_task(
                 self._websocket.start(tickers),
                 name="websocket_listener",
             )
+            await self._db.set_state("ws_status", "CONNECTED")
 
             logger.info("intraday_started", tickers_count=len(tickers))
 
@@ -402,6 +400,7 @@ class TradingBot:
         logger.info("intraday_stopping")
 
         try:
+            await self._db.set_state("ws_status", "DISCONNECTED")
             await self._websocket.stop()
             if self._ws_task is not None and not self._ws_task.done():
                 self._ws_task.cancel()

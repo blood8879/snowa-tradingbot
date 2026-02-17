@@ -86,7 +86,11 @@ export function LogsPage() {
         />
         <StatCard
           label="WS 연결"
-          value={health?.ws_status ?? '-'}
+          value={
+            health?.ws_status === 'CONNECTED'
+              ? 'CONNECTED'
+              : 'OFF (장외)'
+          }
         />
         <StatCard
           label="관심종목"
