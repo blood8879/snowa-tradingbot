@@ -50,7 +50,7 @@ class DailyScreeningPipeline:
     def __init__(self, db: Database) -> None:
         self._db = db
 
-    async def run(self) -> dict:
+    async def run(self, price_period: str = "5d") -> dict:
         """전체 파이프라인 실행.
 
         Returns:
@@ -85,7 +85,7 @@ class DailyScreeningPipeline:
             try:
                 price_new = await price_cache.bulk_load_from_yfinance(
                     tickers,
-                    period="5d",
+                    period=price_period,
                     batch_size=YFINANCE_BATCH_SIZE,
                     delay=YFINANCE_BATCH_DELAY,
                 )

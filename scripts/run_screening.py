@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 
 import structlog
 
@@ -20,14 +21,17 @@ async def main() -> None:
     from core.database import Database
     from bot.daily_screening import DailyScreeningPipeline
 
+    is_init = "--init" in sys.argv
+    period = "1y" if is_init else "5d"
+
     settings = get_settings()
     db = Database(str(settings.db_full_path))
     await db.initialize()
 
     try:
         pipeline = DailyScreeningPipeline(db=db)
-        logger.info("manual_screening_start")
-        result = await pipeline.run()
+        logger.info("manual_screening_start", mode="init" if is_init else "daily", price_period=period)
+        result = await pipeline.run(price_period=period)
         logger.info("manual_screening_complete", **result)
     finally:
         await db.close()

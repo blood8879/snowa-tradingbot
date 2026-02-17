@@ -10,7 +10,7 @@ echo "=== CANSLIM Screening Pipeline ==="
 echo "Starting: $(date)"
 echo ""
 
-"$VENV/bin/python" -m scripts.run_screening
+"$VENV/bin/python" -m scripts.run_screening "$@"
 
 echo ""
 echo "Finished: $(date)"
