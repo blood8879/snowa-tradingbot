@@ -149,7 +149,7 @@ EC2에 접근할 수 있는 포트와 IP를 제한하는 방화벽이다.
 
 **애플리케이션 및 OS 이미지 (AMI):**
 - **Ubuntu** 탭 클릭
-- `Ubuntu Server 22.04 LTS (HVM), SSD Volume Type` 선택
+- `Ubuntu Server 24.04 LTS (HVM), SSD Volume Type` 선택 (Python 3.12 기본 포함)
 - 아키텍처: 64비트 (x86)
 
 **인스턴스 유형:**
@@ -242,18 +242,25 @@ sudo apt install -y git curl wget unzip build-essential sqlite3
 sudo timedatectl set-timezone Asia/Seoul
 ```
 
-### 7단계. Python 3.11+ 설치
+### 7단계. Python 3.11+ 확인
 
-Ubuntu 22.04에는 Python 3.10이 기본이다. 프로젝트는 Python 3.11 이상이 필요하다.
+프로젝트는 Python 3.11 이상이 필요하다 (`pyproject.toml`의 `requires-python = ">=3.11"`).
+
+```bash
+python3 --version
+```
+
+**Ubuntu 24.04 (Noble)**: Python 3.12가 기본 설치되어 있으므로 추가 설치 불필요. 그대로 사용한다.
+
+**Ubuntu 22.04 (Jammy)**: Python 3.10이 기본이므로 3.11을 별도 설치해야 한다:
 
 ```bash
 sudo add-apt-repository ppa:deadsnakes/ppa -y
 sudo apt update
 sudo apt install -y python3.11 python3.11-venv python3.11-dev
-sudo update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1
-
-python3.11 --version
 ```
+
+> **주의:** `update-alternatives`로 시스템 기본 `python3`를 변경하지 않는다. `apt_pkg` 등 시스템 모듈이 깨진다. 가상환경 생성 시 `python3.11 -m venv .venv`로 명시적으로 지정하면 된다.
 
 ### 8단계. Node.js 20+ 설치
 
@@ -287,7 +294,12 @@ Python 가상환경 생성 및 의존성 설치:
 ```bash
 cd /home/ubuntu/snowa_tradingbot
 
-python3.11 -m venv .venv
+# Ubuntu 24.04: python3 (3.12) 사용
+python3 -m venv .venv
+
+# Ubuntu 22.04: python3.11 명시
+# python3.11 -m venv .venv
+
 source .venv/bin/activate
 pip install --upgrade pip
 pip install -e .

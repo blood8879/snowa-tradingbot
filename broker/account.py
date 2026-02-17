@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 import structlog
@@ -18,6 +19,8 @@ from core.database import Database
 from core.models import AccountInfo
 
 logger = structlog.get_logger(__name__)
+
+ACCOUNT_INFO_CACHE_TTL = 60
 
 
 class AccountManager:
@@ -33,8 +36,10 @@ class AccountManager:
     def __init__(self, rest_client: KISRestClient, db: Database) -> None:
         self._rest = rest_client
         self._db = db
+        self._account_info_cache: AccountInfo | None = None
+        self._account_info_cache_ts: float = 0.0
 
-    async def get_account_info(self) -> AccountInfo:
+    async def get_account_info(self, force: bool = False) -> AccountInfo:
         """
         계좌 요약 정보 조회.
 
@@ -44,9 +49,14 @@ class AccountManager:
         Returns:
             AccountInfo: 총 평가액, 현금 잔고, 포지션 가치
         """
-        # 1) 현금 잔고: inquire-psamount (매수 가능 금액 조회)
-        #    inquire-balance는 보유 종목이 없으면 현금 정보를 반환하지 않으므로
-        #    반드시 inquire-psamount를 사용해야 함.
+        now = time.monotonic()
+        if (
+            not force
+            and self._account_info_cache is not None
+            and (now - self._account_info_cache_ts) < ACCOUNT_INFO_CACHE_TTL
+        ):
+            return self._account_info_cache
+
         cash = 0.0
         try:
             psamount = await self._rest.get_purchasable_amount()
@@ -80,6 +90,9 @@ class AccountManager:
             cash=info.cash_balance,
             positions_value=info.total_positions_value,
         )
+
+        self._account_info_cache = info
+        self._account_info_cache_ts = now
 
         return info
 

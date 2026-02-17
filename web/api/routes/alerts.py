@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 import structlog
 from fastapi import APIRouter, Depends
 
@@ -302,7 +304,16 @@ async def get_bot_health(
         except Exception:
             logger.warning("bot_health_equity_fetch_failed", exc_info=True)
 
-    is_running = ws_status == "CONNECTED" or last_heartbeat is not None
+    is_running = False
+    if last_heartbeat is not None:
+        try:
+            hb_time = datetime.fromisoformat(last_heartbeat)
+            if hb_time.tzinfo is None:
+                hb_time = hb_time.replace(tzinfo=timezone.utc)
+            is_running = (datetime.now(timezone.utc) - hb_time) < timedelta(minutes=2)
+        except (ValueError, TypeError):
+            pass
+
     health_status = "running" if is_running else "stopped"
     if recent_error_count > 10:
         health_status = "degraded"

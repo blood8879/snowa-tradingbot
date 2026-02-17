@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 from pathlib import Path
 
 import structlog
@@ -147,7 +148,13 @@ class TradingBot:
         # Step 2.5: 최초 실행 시 시작 잔고 기록
         await self._record_starting_equity()
 
-        # Step 3: 스케줄러 설정
+        # Step 3: 봇 상태 DB 기록
+        now_iso = datetime.now(timezone.utc).isoformat()
+        await self._db.set_state("bot_started_at", now_iso)
+        await self._db.set_state("last_heartbeat", now_iso)
+        await self._db.set_state("trading_mode", self._settings.trading_mode.value)
+
+        # Step 4: 스케줄러 설정
         self._setup_scheduler()
         self._scheduler.start()
         self._running = True
@@ -158,12 +165,17 @@ class TradingBot:
             scheduler_jobs=len(self._scheduler.get_jobs()),
         )
 
-        # Step 4: 킬스위치 감시 루프
+        # Step 5: 킬스위치 감시 + heartbeat 루프
         try:
             while self._running:
                 if self._check_kill_switch():
                     logger.warning("kill_switch_detected")
                     break
+                # heartbeat 갱신
+                await self._db.set_state(
+                    "last_heartbeat",
+                    datetime.now(timezone.utc).isoformat(),
+                )
                 await asyncio.sleep(KILL_SWITCH_CHECK_INTERVAL_SECONDS)
         except asyncio.CancelledError:
             logger.info("trading_bot_cancelled")
