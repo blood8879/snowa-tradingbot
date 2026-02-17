@@ -292,7 +292,7 @@ cd snowa_tradingbot
 Python 가상환경 생성 및 의존성 설치:
 
 ```bash
-cd /home/ubuntu/snowa_tradingbot
+cd /home/ubuntu/apps/snowa_tradingbot
 
 # Ubuntu 24.04: python3 (3.12) 사용
 python3 -m venv .venv
@@ -308,7 +308,7 @@ pip install -e .
 ### 10단계. 프론트엔드 빌드
 
 ```bash
-cd /home/ubuntu/snowa_tradingbot/web/frontend
+cd /home/ubuntu/apps/snowa_tradingbot/web/frontend
 npm ci
 npm run build
 
@@ -334,7 +334,7 @@ sudo rm /swapfile
 ### 11단계. 환경변수 설정 (.env)
 
 ```bash
-cd /home/ubuntu/snowa_tradingbot
+cd /home/ubuntu/apps/snowa_tradingbot
 cp .env.example .env
 nano .env
 ```
@@ -368,7 +368,7 @@ mkdir -p data logs
 systemd에 등록하기 전에 수동으로 정상 동작을 확인한다.
 
 ```bash
-cd /home/ubuntu/snowa_tradingbot
+cd /home/ubuntu/apps/snowa_tradingbot
 source .venv/bin/activate
 
 # 대시보드 테스트
@@ -401,10 +401,10 @@ Wants=network-online.target
 Type=simple
 User=ubuntu
 Group=ubuntu
-WorkingDirectory=/home/ubuntu/snowa_tradingbot
-Environment="PATH=/home/ubuntu/snowa_tradingbot/.venv/bin:/usr/local/bin:/usr/bin:/bin"
-EnvironmentFile=/home/ubuntu/snowa_tradingbot/.env
-ExecStart=/home/ubuntu/snowa_tradingbot/.venv/bin/python -m scripts.run_bot
+WorkingDirectory=/home/ubuntu/apps/snowa_tradingbot
+Environment="PATH=/home/ubuntu/apps/snowa_tradingbot/.venv/bin:/usr/local/bin:/usr/bin:/bin"
+EnvironmentFile=/home/ubuntu/apps/snowa_tradingbot/.env
+ExecStart=/home/ubuntu/apps/snowa_tradingbot/.venv/bin/python -m scripts.run_bot
 Restart=always
 RestartSec=10
 StartLimitIntervalSec=300
@@ -433,10 +433,10 @@ Wants=network-online.target
 Type=simple
 User=ubuntu
 Group=ubuntu
-WorkingDirectory=/home/ubuntu/snowa_tradingbot
-Environment="PATH=/home/ubuntu/snowa_tradingbot/.venv/bin:/usr/local/bin:/usr/bin:/bin"
-EnvironmentFile=/home/ubuntu/snowa_tradingbot/.env
-ExecStart=/home/ubuntu/snowa_tradingbot/.venv/bin/uvicorn web.api.main:app --host 0.0.0.0 --port 8000
+WorkingDirectory=/home/ubuntu/apps/snowa_tradingbot
+Environment="PATH=/home/ubuntu/apps/snowa_tradingbot/.venv/bin:/usr/local/bin:/usr/bin:/bin"
+EnvironmentFile=/home/ubuntu/apps/snowa_tradingbot/.env
+ExecStart=/home/ubuntu/apps/snowa_tradingbot/.venv/bin/uvicorn web.api.main:app --host 0.0.0.0 --port 8000
 Restart=always
 RestartSec=5
 StartLimitIntervalSec=300
@@ -630,7 +630,7 @@ sudo usermod -aG docker ubuntu
 exit
 ssh -i ~/.ssh/snowa-key.pem ubuntu@<Elastic-IP>
 
-cd /home/ubuntu/snowa_tradingbot
+cd /home/ubuntu/apps/snowa_tradingbot
 cp .env.example .env
 nano .env
 
@@ -667,7 +667,7 @@ sudo journalctl -u snowa-dashboard.service -f     # 대시보드 로그 (실시�
 sudo journalctl -u snowa-bot.service -n 100       # 최근 100줄
 sudo journalctl -u snowa-bot.service --since today # 오늘 로그만
 
-tail -f /home/ubuntu/snowa_tradingbot/logs/*.log  # 파일 로그
+tail -f /home/ubuntu/apps/snowa_tradingbot/logs/*.log  # 파일 로그
 ```
 
 ### 서비스 재시작
@@ -681,7 +681,7 @@ sudo systemctl status snowa-bot.service
 ### 코드 업데이트 & 재배포
 
 ```bash
-cd /home/ubuntu/snowa_tradingbot
+cd /home/ubuntu/apps/snowa_tradingbot
 
 git pull origin main
 
@@ -704,7 +704,7 @@ rsync -avz --exclude '.venv' --exclude 'node_modules' --exclude '.env' \
   --exclude 'data/' --exclude 'logs/' --exclude '__pycache__' \
   -e "ssh -i ~/.ssh/snowa-key.pem" \
   /Users/yunjihwan/Documents/project/snowa_tradingbot/ \
-  ubuntu@<Elastic-IP>:/home/ubuntu/snowa_tradingbot/
+  ubuntu@<Elastic-IP>:/home/ubuntu/apps/snowa_tradingbot/
 ```
 
 ### SQLite DB 백업 (S3)
@@ -737,7 +737,7 @@ nano /home/ubuntu/backup_db.sh
 
 ```bash
 #!/bin/bash
-DB_PATH="/home/ubuntu/snowa_tradingbot/data/snowa.db"
+DB_PATH="/home/ubuntu/apps/snowa_tradingbot/data/snowa.db"
 S3_BUCKET="snowa-backups-본인아이디"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 BACKUP_NAME="snowa_${TIMESTAMP}.db"
@@ -759,7 +759,7 @@ crontab -e
 ```
 
 ```
-0 7 * * * /home/ubuntu/backup_db.sh >> /home/ubuntu/snowa_tradingbot/logs/backup.log 2>&1
+0 7 * * * /home/ubuntu/backup_db.sh >> /home/ubuntu/apps/snowa_tradingbot/logs/backup.log 2>&1
 ```
 
 ### 헬스체크 & 자동 알림
@@ -797,7 +797,7 @@ crontab -e
 아래 줄 추가:
 
 ```
-*/5 * * * * /home/ubuntu/healthcheck.sh >> /home/ubuntu/snowa_tradingbot/logs/healthcheck.log 2>&1
+*/5 * * * * /home/ubuntu/healthcheck.sh >> /home/ubuntu/apps/snowa_tradingbot/logs/healthcheck.log 2>&1
 ```
 
 ---
