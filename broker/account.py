@@ -21,6 +21,7 @@ from core.models import AccountInfo
 logger = structlog.get_logger(__name__)
 
 ACCOUNT_INFO_CACHE_TTL = 60
+ACCOUNT_INFO_FAIL_CACHE_TTL = 300
 
 
 class AccountManager:
@@ -50,12 +51,14 @@ class AccountManager:
             AccountInfo: 총 평가액, 현금 잔고, 포지션 가치
         """
         now = time.monotonic()
-        if (
-            not force
-            and self._account_info_cache is not None
-            and (now - self._account_info_cache_ts) < ACCOUNT_INFO_CACHE_TTL
-        ):
-            return self._account_info_cache
+        if not force and self._account_info_cache is not None:
+            ttl = (
+                ACCOUNT_INFO_CACHE_TTL
+                if self._account_info_cache.total_equity > 0
+                else ACCOUNT_INFO_FAIL_CACHE_TTL
+            )
+            if (now - self._account_info_cache_ts) < ttl:
+                return self._account_info_cache
 
         cash = 0.0
         try:
@@ -91,9 +94,8 @@ class AccountManager:
             positions_value=info.total_positions_value,
         )
 
-        if info.total_equity > 0:
-            self._account_info_cache = info
-            self._account_info_cache_ts = now
+        self._account_info_cache = info
+        self._account_info_cache_ts = now
 
         return info
 

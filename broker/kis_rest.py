@@ -141,7 +141,8 @@ class KISRestClient:
                 if rt_cd != "0":
                     msg = data.get("msg1", "알 수 없는 오류")
                     msg_cd = data.get("msg_cd", "")
-                    logger.error(
+                    log_fn = logger.warning if attempt < MAX_RETRIES else logger.error
+                    log_fn(
                         "kis_api_error",
                         path=path,
                         tr_id=tr_id,
