@@ -91,8 +91,9 @@ class AccountManager:
             positions_value=info.total_positions_value,
         )
 
-        self._account_info_cache = info
-        self._account_info_cache_ts = now
+        if info.total_equity > 0:
+            self._account_info_cache = info
+            self._account_info_cache_ts = now
 
         return info
 
