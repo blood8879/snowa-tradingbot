@@ -119,6 +119,7 @@ class TradingBot:
         self._scheduler = AsyncIOScheduler(timezone="Asia/Seoul")
         self._running: bool = False
         self._ws_task: asyncio.Task | None = None
+        self._fill_check_task: asyncio.Task | None = None
 
     # ────────────────────────────────────────────────────────
     # Main Entry Point
@@ -385,12 +386,31 @@ class TradingBot:
                 self._websocket.start(tickers),
                 name="websocket_listener",
             )
+            self._fill_check_task = asyncio.create_task(
+                self._fill_check_loop(),
+                name="fill_check_loop",
+            )
             await self._db.set_state("ws_status", "CONNECTED")
 
             logger.info("intraday_started", tickers_count=len(tickers))
 
         except Exception as e:
             logger.error("intraday_start_failed", error=str(e), exc_info=True)
+
+    async def _fill_check_loop(self) -> None:
+        """장중 60초 간격으로 미체결 주문의 체결 상태를 확인한다."""
+        FILL_CHECK_INTERVAL = 60
+        try:
+            while True:
+                await asyncio.sleep(FILL_CHECK_INTERVAL)
+                try:
+                    filled = await self._order_executor.check_order_fills()
+                    if filled:
+                        logger.info("fill_check_matched", count=len(filled))
+                except Exception:
+                    logger.exception("fill_check_error")
+        except asyncio.CancelledError:
+            pass
 
     async def _stop_intraday(self) -> None:
         """장중 모니터링 중지.
@@ -402,13 +422,16 @@ class TradingBot:
         try:
             await self._db.set_state("ws_status", "DISCONNECTED")
             await self._websocket.stop()
-            if self._ws_task is not None and not self._ws_task.done():
-                self._ws_task.cancel()
-                try:
-                    await self._ws_task
-                except asyncio.CancelledError:
-                    pass
-                self._ws_task = None
+
+            for task_ref in (self._ws_task, self._fill_check_task):
+                if task_ref is not None and not task_ref.done():
+                    task_ref.cancel()
+                    try:
+                        await task_ref
+                    except asyncio.CancelledError:
+                        pass
+            self._ws_task = None
+            self._fill_check_task = None
 
             await self._intraday.stop()
             logger.info("intraday_stopped")

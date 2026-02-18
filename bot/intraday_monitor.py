@@ -5,15 +5,13 @@
 1. 손절 체크 (가장 긴급)
 2. 피라미딩 체크
 3. 신규 진입 체크
-4. Donchian 청산 체크 (장 마감 15분 전만)
+4. Donchian 청산 체크 (매 틱마다 실시간)
 """
 
 from __future__ import annotations
 
 import time
 from datetime import datetime, timezone
-from zoneinfo import ZoneInfo
-
 import structlog
 
 from broker.kis_rest import KISRestClient
@@ -33,7 +31,7 @@ from portfolio.position_sizer import calculate_unit_shares
 from portfolio.risk_manager import RiskManager
 from strategy.breakout_tracker import BreakoutTracker
 from strategy.entry_signals import check_entry_signals
-from strategy.exit_signals import check_donchian_exit, should_check_donchian_exit
+from strategy.exit_signals import check_donchian_exit
 from strategy.pyramiding import check_pyramid_signal
 from strategy.stop_loss import check_stop_hit, update_stop_on_pyramid
 from bot.journal_context import (
@@ -120,7 +118,7 @@ class IntradayMonitor:
           1. 보유 종목 → 손절 체크 (가장 긴급)
           2. 보유 종목 → 피라미딩 체크
           3. 워치리스트 & 마켓필터 통과 & 미보유 → 신규 진입 체크
-          4. 장 마감 15분 전 & 보유 종목 → Donchian 청산 체크
+          4. 보유 종목 → Donchian 청산 체크 (매 틱마다 실시간)
 
         Args:
             ticker: 종목 코드.
@@ -182,23 +180,11 @@ class IntradayMonitor:
                 )
                 return
 
-        # ── Priority 4: Donchian 청산 체크 (장 마감 15분 전만) ──
+        # ── Priority 4: Donchian 청산 체크 (매 틱마다) ──
         if position is not None:
-            now_utc = datetime.fromtimestamp(timestamp, tz=timezone.utc)
-            # US Eastern: DST-aware 변환 (EDT/EST 자동 반영)
-            now_et = now_utc.astimezone(ZoneInfo("America/New_York"))
-            et_hour = now_et.hour
-            et_minute = now_et.minute
-
-            if should_check_donchian_exit(
-                current_hour=et_hour,
-                current_minute=et_minute,
-                market_close_hour=16,
-                market_close_minute=0,
-            ):
-                await self._execute_donchian_exit(
-                    ticker, price, position, signals, timestamp,
-                )
+            await self._execute_donchian_exit(
+                ticker, price, position, signals, timestamp,
+            )
 
     # ────────────────────────────────────────────────────────
     # Execution: Stop-Loss
@@ -540,8 +526,6 @@ class IntradayMonitor:
         timestamp: float,
     ) -> None:
         """Donchian 채널 청산 실행.
-
-        장 마감 15분 전에만 호출된다.
 
         Args:
             ticker: 종목 코드.

@@ -285,15 +285,111 @@ class OrderExecutor:
     async def check_order_fills(self) -> list[Order]:
         """
         미체결 주문의 체결 상태를 확인하고 DB 업데이트.
-        체결된 주문 목록을 반환.
+
+        1. DB에서 SUBMITTED/PARTIAL 상태의 주문을 조회
+        2. KIS API에서 오늘 체결 내역을 조회
+        3. broker_order_id(odno)로 매칭하여 체결 수량/가격을 업데이트
+        4. 완전 체결 → FILLED, 부분 체결 → PARTIAL
+
+        Returns:
+            새로 FILLED 상태가 된 주문 목록.
         """
         filled_orders: list[Order] = []
 
         try:
+            cursor = await self._db.conn.execute(
+                """
+                SELECT id, broker_order_id, ticker, side, order_type,
+                       requested_shares, requested_price,
+                       filled_shares, filled_price,
+                       status, created_at, updated_at, filled_at, notes
+                FROM orders
+                WHERE status IN (?, ?)
+                """,
+                (OrderStatus.SUBMITTED.value, OrderStatus.PARTIAL.value),
+            )
+            rows = await cursor.fetchall()
+
+            if not rows:
+                return filled_orders
+
+            pending_orders: dict[str, Order] = {}
+            for row in rows:
+                order = Order(
+                    id=row[0],
+                    broker_order_id=row[1],
+                    ticker=row[2],
+                    side=OrderSide(row[3]),
+                    order_type=OrderType(row[4]),
+                    requested_shares=row[5],
+                    requested_price=row[6],
+                    filled_shares=row[7] or 0,
+                    filled_price=row[8],
+                    status=OrderStatus(row[9]),
+                    created_at=row[10],
+                    updated_at=row[11],
+                    filled_at=row[12],
+                    notes=row[13],
+                )
+                if order.broker_order_id:
+                    pending_orders[order.broker_order_id] = order
+
+            if not pending_orders:
+                return filled_orders
+
             fills = await self._rest.get_filled_orders()
-            # TODO: 구현 — 체결 내역과 DB의 SUBMITTED 주문을 매칭
-            # 매칭된 건: status → FILLED, filled_shares/filled_price 업데이트
-            # 부분 체결: status → PARTIAL
+
+            if not fills:
+                return filled_orders
+
+            for fill in fills:
+                order_no = fill.get("odno", "")
+                if not order_no or order_no not in pending_orders:
+                    continue
+
+                order = pending_orders[order_no]
+
+                # KIS 해외주식 체결 필드: ft_ccld_qty(체결수량), ft_ccld_unpr3(체결단가)
+                fill_qty = int(float(fill.get("ft_ccld_qty", 0)))
+                fill_price = float(fill.get("ft_ccld_unpr3", 0))
+
+                if fill_qty <= 0:
+                    continue
+
+                if order.status == OrderStatus.FILLED:
+                    continue
+
+                order.filled_shares = fill_qty
+                if fill_price > 0:
+                    order.filled_price = fill_price
+                order.updated_at = _now_iso()
+
+                if order.filled_shares >= order.requested_shares:
+                    order.status = OrderStatus.FILLED
+                    order.filled_at = _now_iso()
+                    filled_orders.append(order)
+                    logger.info(
+                        "order_filled",
+                        order_id=order.id,
+                        broker_order_id=order_no,
+                        ticker=order.ticker,
+                        side=order.side.value,
+                        filled_shares=order.filled_shares,
+                        filled_price=order.filled_price,
+                    )
+                else:
+                    order.status = OrderStatus.PARTIAL
+                    logger.info(
+                        "order_partial_fill",
+                        order_id=order.id,
+                        broker_order_id=order_no,
+                        ticker=order.ticker,
+                        filled=order.filled_shares,
+                        requested=order.requested_shares,
+                    )
+
+                await self._save_order(order)
+
         except Exception as e:
             logger.error("check_fills_failed", error=str(e))
 
