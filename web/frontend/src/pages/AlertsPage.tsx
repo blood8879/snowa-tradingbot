@@ -180,6 +180,16 @@ function getColumns(): AlertColumn[] {
         </span>
       ),
     },
+    {
+      key: 'last_screened',
+      header: '데이터 기준일',
+      render: (row) => {
+        if (!row.last_screened) return <span className="text-slate-500">—</span>;
+        const d = new Date(row.last_screened);
+        const formatted = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+        return <span className="text-slate-400 text-xs tabular-nums">{formatted}</span>;
+      },
+    },
   ];
 }
 

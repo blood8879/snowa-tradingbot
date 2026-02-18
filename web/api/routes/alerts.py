@@ -19,7 +19,7 @@ router = APIRouter(tags=["alerts"])
 async def get_near_entry_alerts(db: Database = Depends(get_db)) -> dict:
     watchlist_cursor = await db.conn.execute(
         """
-        SELECT ticker, rs_rating, custom_composite_score, latest_price
+        SELECT ticker, rs_rating, custom_composite_score, latest_price, last_screened
         FROM watchlist
         WHERE status = 'ACTIVE'
         """
@@ -33,6 +33,7 @@ async def get_near_entry_alerts(db: Database = Depends(get_db)) -> dict:
         rs_rating = row[1]
         composite_score = row[2]
         latest_price = row[3]
+        last_screened = row[4]
 
         prices_cursor = await db.conn.execute(
             """
@@ -112,6 +113,7 @@ async def get_near_entry_alerts(db: Database = Depends(get_db)) -> dict:
             "rs_rating": rs_rating,
             "composite_score": composite_score,
             "sma_20": round(sma_20, 2),
+            "last_screened": last_screened,
         })
 
     alerts.sort(key=lambda a: a["proximity_pct_20"])

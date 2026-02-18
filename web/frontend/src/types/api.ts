@@ -321,6 +321,7 @@ export interface NearEntryAlert {
   rs_rating: number | null;
   composite_score: number | null;
   sma_20: number;
+  last_screened: string | null;
 }
 
 export interface NearEntryAlertsResponse {
