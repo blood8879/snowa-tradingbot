@@ -72,13 +72,17 @@ class TradingBot:
         # ── Broker Layer ──
         self._auth = KISAuth()
         self._rest_client = KISRestClient(self._auth)
-        self._order_executor = OrderExecutor(self._rest_client, self._db)
 
         # ── Portfolio Layer ──
         self._account_mgr = AccountManager(self._rest_client, self._db)
         self._position_mgr = PositionManager(self._db)
         self._correlation_mgr = CorrelationGroupManager()
         self._risk_mgr = RiskManager(self._position_mgr, self._correlation_mgr)
+
+        # ── Order Executor (after position_mgr for fill-confirmed management) ──
+        self._order_executor = OrderExecutor(
+            self._rest_client, self._db, self._position_mgr,
+        )
 
         # ── Bot Layer ──
         self._mode_mgr = ModeManager(self._db)

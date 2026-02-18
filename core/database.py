@@ -331,6 +331,35 @@ class Database:
         row = await cursor.fetchone()
         return row[0] if row and row[0] else 0
 
+    async def has_submitted_order(
+        self,
+        ticker: str,
+        side: str,
+        order_type: str | None = None,
+    ) -> bool:
+        """Check if a SUBMITTED or PARTIAL order exists for this ticker+side."""
+        if order_type:
+            cursor = await self.conn.execute(
+                """
+                SELECT 1 FROM orders
+                WHERE ticker = ? AND side = ? AND order_type = ?
+                  AND status IN ('SUBMITTED', 'PARTIAL')
+                LIMIT 1
+                """,
+                (ticker, side, order_type),
+            )
+        else:
+            cursor = await self.conn.execute(
+                """
+                SELECT 1 FROM orders
+                WHERE ticker = ? AND side = ?
+                  AND status IN ('SUBMITTED', 'PARTIAL')
+                LIMIT 1
+                """,
+                (ticker, side),
+            )
+        return await cursor.fetchone() is not None
+
     async def table_exists(self, table_name: str) -> bool:
         """Check if a table exists in the database."""
         cursor = await self.conn.execute(

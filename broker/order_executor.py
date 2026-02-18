@@ -15,7 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 import structlog
 
@@ -27,7 +27,10 @@ from config.constants import (
     STOP_SELL_BUFFER_PCT,
 )
 from core.database import Database
-from core.models import Order, OrderSide, OrderStatus, OrderType
+from core.models import CloseReason, Order, OrderSide, OrderStatus, OrderType
+
+if TYPE_CHECKING:
+    from portfolio.position_manager import PositionManager
 
 logger = structlog.get_logger(__name__)
 
@@ -44,9 +47,15 @@ class OrderExecutor:
     - 주문 상태 추적 (DB에 기록)
     """
 
-    def __init__(self, rest_client: KISRestClient, db: Database) -> None:
+    def __init__(
+        self,
+        rest_client: KISRestClient,
+        db: Database,
+        position_mgr: PositionManager | None = None,
+    ) -> None:
         self._rest = rest_client
         self._db = db
+        self._position_mgr = position_mgr
 
     # ────────────────────────────────────────────────────────
     # 진입 주문
@@ -359,6 +368,10 @@ class OrderExecutor:
                 if order.status == OrderStatus.FILLED:
                     continue
 
+                old_filled = order.filled_shares
+                if fill_qty <= old_filled:
+                    continue
+
                 order.filled_shares = fill_qty
                 if fill_price > 0:
                     order.filled_price = fill_price
@@ -390,10 +403,134 @@ class OrderExecutor:
 
                 await self._save_order(order)
 
+                if self._position_mgr:
+                    await self._handle_fill_position(order, old_filled)
+
         except Exception as e:
             logger.error("check_fills_failed", error=str(e))
 
         return filled_orders
+
+    # ────────────────────────────────────────────────────────
+    # 체결 후 포지션 반영
+    # ────────────────────────────────────────────────────────
+
+    async def _handle_fill_position(self, order: Order, old_filled: int) -> None:
+        """체결 확인 후 포지션 생성/업데이트/청산."""
+        notes: dict = {}
+        if order.notes:
+            try:
+                notes = json.loads(order.notes)
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+        fill_price = order.filled_price or order.requested_price
+        fill_shares = order.filled_shares
+
+        try:
+            if order.order_type == OrderType.ENTRY and order.side == OrderSide.BUY:
+                position = await self._position_mgr.get_position(order.ticker)
+                if position is None:
+                    await self._position_mgr.open_position(
+                        ticker=order.ticker,
+                        system=notes.get("system", "S1"),
+                        entry_price=fill_price,
+                        shares=fill_shares,
+                        n_value=notes.get("atr", 0.0),
+                        stop_price=notes.get("stop_price", 0.0),
+                    )
+                    logger.info(
+                        "fill_position_opened",
+                        ticker=order.ticker,
+                        price=fill_price,
+                        shares=fill_shares,
+                    )
+                else:
+                    await self._position_mgr.update_entry_fill(
+                        position_id=position.id,
+                        filled_shares=fill_shares,
+                        fill_price=fill_price,
+                    )
+
+            elif order.order_type == OrderType.PYRAMID and order.side == OrderSide.BUY:
+                position = await self._position_mgr.get_position(order.ticker)
+                if position is None:
+                    logger.error("fill_pyramid_no_position", ticker=order.ticker)
+                    return
+
+                if old_filled == 0:
+                    new_stop = notes.get("new_stop", position.current_stop_price)
+                    await self._position_mgr.add_unit(
+                        position_id=position.id,
+                        entry_price=fill_price,
+                        shares=fill_shares,
+                        stop_price=new_stop,
+                    )
+                    logger.info(
+                        "fill_pyramid_added",
+                        ticker=order.ticker,
+                        price=fill_price,
+                        shares=fill_shares,
+                    )
+                else:
+                    await self._position_mgr.update_pyramid_fill(
+                        position_id=position.id,
+                        filled_shares=fill_shares,
+                        fill_price=fill_price,
+                    )
+
+            elif order.order_type == OrderType.STOP_LOSS and order.side == OrderSide.SELL:
+                if order.status != OrderStatus.FILLED:
+                    logger.info(
+                        "stop_loss_partial_waiting",
+                        ticker=order.ticker,
+                        filled=fill_shares,
+                        requested=order.requested_shares,
+                    )
+                    return
+                position = await self._position_mgr.get_position(order.ticker)
+                if position and position.id is not None:
+                    await self._position_mgr.close_position(
+                        position_id=position.id,
+                        reason=CloseReason.STOP_LOSS.value,
+                        exit_price=fill_price,
+                    )
+                    logger.info("fill_stop_loss_closed", ticker=order.ticker, price=fill_price)
+                else:
+                    logger.warning("fill_stop_loss_no_position", ticker=order.ticker)
+
+            elif order.order_type == OrderType.EXIT and order.side == OrderSide.SELL:
+                if order.status != OrderStatus.FILLED:
+                    logger.info(
+                        "exit_partial_waiting",
+                        ticker=order.ticker,
+                        filled=fill_shares,
+                        requested=order.requested_shares,
+                    )
+                    return
+                position = await self._position_mgr.get_position(order.ticker)
+                if position and position.id is not None:
+                    system = notes.get("system", "S1")
+                    reason = (
+                        CloseReason.SYSTEM1_EXIT.value
+                        if system == "S1"
+                        else CloseReason.SYSTEM2_EXIT.value
+                    )
+                    await self._position_mgr.close_position(
+                        position_id=position.id,
+                        reason=reason,
+                        exit_price=fill_price,
+                    )
+                    logger.info("fill_exit_closed", ticker=order.ticker, price=fill_price)
+                else:
+                    logger.warning("fill_exit_no_position", ticker=order.ticker)
+
+        except Exception:
+            logger.exception(
+                "fill_position_handling_failed",
+                ticker=order.ticker,
+                order_type=order.order_type.value,
+            )
 
     # ────────────────────────────────────────────────────────
     # DB 저장

@@ -169,6 +169,118 @@ class PositionManager:
         )
         return realized_pnl
 
+    # ── Fill Updates ────────────────────────────────────────
+
+    async def update_entry_fill(
+        self,
+        position_id: int,
+        filled_shares: int,
+        fill_price: float,
+    ) -> None:
+        """Update position's first unit with cumulative fill data from broker."""
+        conn = self._db.conn
+
+        await conn.execute(
+            """
+            UPDATE units
+            SET shares = ?, entry_price = ?
+            WHERE position_id = ? AND unit_number = 1
+            """,
+            (filled_shares, fill_price, position_id),
+        )
+
+        cursor = await conn.execute(
+            """
+            SELECT SUM(shares), SUM(shares * entry_price)
+            FROM units WHERE position_id = ?
+            """,
+            (position_id,),
+        )
+        row = await cursor.fetchone()
+        total_shares = row[0] or 0
+        total_cost = row[1] or 0.0
+        avg_entry = total_cost / total_shares if total_shares > 0 else 0.0
+
+        await conn.execute(
+            """
+            UPDATE positions
+            SET total_shares = ?, total_cost = ?, avg_entry_price = ?
+            WHERE id = ?
+            """,
+            (total_shares, total_cost, avg_entry, position_id),
+        )
+        await conn.commit()
+
+        logger.info(
+            "entry_fill_updated",
+            position_id=position_id,
+            filled_shares=filled_shares,
+            fill_price=fill_price,
+            total_shares=total_shares,
+        )
+
+    async def update_pyramid_fill(
+        self,
+        position_id: int,
+        filled_shares: int,
+        fill_price: float,
+    ) -> None:
+        """Update latest pyramid unit with cumulative fill data from broker."""
+        conn = self._db.conn
+
+        cursor = await conn.execute(
+            """
+            SELECT unit_number FROM units
+            WHERE position_id = ?
+            ORDER BY unit_number DESC LIMIT 1
+            """,
+            (position_id,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            raise ValueError(f"No units found for position {position_id}")
+        unit_number = row[0]
+
+        await conn.execute(
+            """
+            UPDATE units
+            SET shares = ?, entry_price = ?
+            WHERE position_id = ? AND unit_number = ?
+            """,
+            (filled_shares, fill_price, position_id, unit_number),
+        )
+
+        cursor = await conn.execute(
+            """
+            SELECT SUM(shares), SUM(shares * entry_price)
+            FROM units WHERE position_id = ?
+            """,
+            (position_id,),
+        )
+        row = await cursor.fetchone()
+        total_shares = row[0] or 0
+        total_cost = row[1] or 0.0
+        avg_entry = total_cost / total_shares if total_shares > 0 else 0.0
+
+        await conn.execute(
+            """
+            UPDATE positions
+            SET total_shares = ?, total_cost = ?, avg_entry_price = ?
+            WHERE id = ?
+            """,
+            (total_shares, total_cost, avg_entry, position_id),
+        )
+        await conn.commit()
+
+        logger.info(
+            "pyramid_fill_updated",
+            position_id=position_id,
+            unit_number=unit_number,
+            filled_shares=filled_shares,
+            fill_price=fill_price,
+            total_shares=total_shares,
+        )
+
     # ── Pyramid Units ────────────────────────────────────────
 
     async def add_unit(

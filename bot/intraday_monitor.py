@@ -19,7 +19,6 @@ from broker.order_executor import OrderExecutor
 from core.database import Database
 from core.events import EventBus
 from core.models import (
-    CloseReason,
     OrderType,
     PrecomputedSignals,
     SignalType,
@@ -205,6 +204,10 @@ class IntradayMonitor:
             position: 현재 포지션 객체.
             timestamp: 이벤트 시각.
         """
+        if await self._db.has_submitted_order(ticker, "SELL", "STOP_LOSS"):
+            logger.info("stop_loss_skipped_pending_order", ticker=ticker)
+            return
+
         logger.warning(
             "stop_loss_triggered",
             ticker=ticker,
@@ -213,7 +216,6 @@ class IntradayMonitor:
             total_shares=position.total_shares,  # type: ignore[attr-defined]
         )
 
-        # ── 매매일지 컨텍스트 ──
         journal_notes = build_stop_loss_context(
             stop_price=position.current_stop_price,  # type: ignore[attr-defined]
             trigger_price=price,
@@ -229,13 +231,6 @@ class IntradayMonitor:
             current_price=price,
             shares=position.total_shares,  # type: ignore[attr-defined]
             notes=journal_notes,
-        )
-
-        # 포지션 청산
-        await self._position_mgr.close_position(
-            position_id=position.id,  # type: ignore[attr-defined]
-            reason=CloseReason.STOP_LOSS.value,
-            exit_price=price,
         )
 
         # 이벤트 발행
@@ -272,6 +267,10 @@ class IntradayMonitor:
             pyramid_result: check_pyramid_signal 결과.
             timestamp: 이벤트 시각.
         """
+        if await self._db.has_submitted_order(ticker, "BUY", "PYRAMID"):
+            logger.info("pyramid_skipped_pending_order", ticker=ticker)
+            return
+
         # 계좌 잔고 조회
         try:
             account_info = await self._rest.get_balance()
@@ -344,16 +343,10 @@ class IntradayMonitor:
             notes=journal_notes,
         )
 
-        # 포지션에 유닛 추가 & 스톱 갱신
-        await self._position_mgr.add_unit(
-            position_id=position.id,  # type: ignore[attr-defined]
-            entry_price=price,
-            shares=shares,
-            stop_price=new_stop,
-        )
+        # NOTE: 포지션 갱신은 _handle_fill_position() 에서 체결 확인 후 수행
 
         logger.info(
-            "pyramid_executed",
+            "pyramid_order_submitted",
             ticker=ticker,
             unit_number=pyramid_result["next_unit_number"],
             shares=shares,
@@ -396,6 +389,10 @@ class IntradayMonitor:
             entry_signal: check_entry_signals 에서 반환된 시그널 dict.
             timestamp: 이벤트 시각.
         """
+        if await self._db.has_submitted_order(ticker, "BUY", "ENTRY"):
+            logger.info("entry_skipped_pending_order", ticker=ticker)
+            return
+
         # 계좌 잔고 조회
         try:
             account_info = await self._rest.get_balance()
@@ -480,18 +477,10 @@ class IntradayMonitor:
             notes=journal_notes,
         )
 
-        # 포지션 오픈
-        await self._position_mgr.open_position(
-            ticker=ticker,
-            system=system,
-            entry_price=price,
-            shares=shares,
-            n_value=signals.n_value,
-            stop_price=stop_price,
-        )
+        # NOTE: 포지션 오픈은 _handle_fill_position() 에서 체결 확인 후 수행
 
         logger.info(
-            "entry_executed",
+            "entry_order_submitted",
             ticker=ticker,
             system=system,
             shares=shares,
@@ -534,6 +523,10 @@ class IntradayMonitor:
             signals: 사전 계산 시그널.
             timestamp: 이벤트 시각.
         """
+        if await self._db.has_submitted_order(ticker, "SELL", "EXIT"):
+            logger.info("donchian_exit_skipped_pending_order", ticker=ticker)
+            return
+
         system = position.system.value if hasattr(position.system, "value") else str(position.system)  # type: ignore[attr-defined]
 
         exit_result = check_donchian_exit(
@@ -567,7 +560,6 @@ class IntradayMonitor:
             current_price=price,
         )
 
-        # 청산 주문
         order = await self._order_executor.execute_exit_sell(
             ticker=ticker,
             exchange=await self._resolve_exchange(ticker),
@@ -577,17 +569,7 @@ class IntradayMonitor:
             notes=journal_notes,
         )
 
-        # 포지션 청산
-        close_reason = (
-            CloseReason.SYSTEM1_EXIT.value
-            if system == "S1"
-            else CloseReason.SYSTEM2_EXIT.value
-        )
-        await self._position_mgr.close_position(
-            position_id=position.id,  # type: ignore[attr-defined]
-            reason=close_reason,
-            exit_price=price,
-        )
+        # NOTE: 포지션 청산은 _handle_fill_position() 에서 체결 확인 후 수행
 
         # 이벤트 발행
         signal = TradeSignal(
