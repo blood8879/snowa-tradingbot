@@ -147,13 +147,13 @@ function getColumns(realtimeData?: RealtimePricesResponse): Column<WatchlistStoc
       ),
     },
     {
-      key: 'last_screened',
-      header: '데이터 기준일',
+      key: 'latest_financial_date',
+      header: '재무 기준일',
       sortable: true,
       render: (row) => {
-        if (!row.last_screened) return <span className="text-slate-500">—</span>;
-        const d = new Date(row.last_screened);
-        const formatted = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+        if (!row.latest_financial_date) return <span className="text-slate-500">—</span>;
+        const parts = row.latest_financial_date.split('-');
+        const formatted = `${parts[0].slice(2)}/${parts[1]}/${parts[2]}`;
         return <span className="text-slate-400 text-xs tabular-nums">{formatted}</span>;
       },
     },
@@ -213,9 +213,9 @@ function sortWatchlist(
         aVal = a.avg_volume_50d;
         bVal = b.avg_volume_50d;
         break;
-      case 'last_screened':
-        aVal = a.last_screened ?? '';
-        bVal = b.last_screened ?? '';
+      case 'latest_financial_date':
+        aVal = a.latest_financial_date ?? '';
+        bVal = b.latest_financial_date ?? '';
         break;
       default:
         return 0;

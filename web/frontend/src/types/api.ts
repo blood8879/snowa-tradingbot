@@ -89,6 +89,7 @@ export interface WatchlistStock {
   market_cap: number | null;
   status: string;
   latest_price: number | null;
+  latest_financial_date: string | null;
   n_value: number | null;
   avg_volume_50d: number | null;
 }
@@ -321,7 +322,7 @@ export interface NearEntryAlert {
   rs_rating: number | null;
   composite_score: number | null;
   sma_20: number;
-  last_screened: string | null;
+  latest_financial_date: string | null;
 }
 
 export interface NearEntryAlertsResponse {

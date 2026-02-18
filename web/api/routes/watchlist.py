@@ -77,13 +77,19 @@ async def get_watchlist(db: Database = Depends(get_db)) -> dict:
                w.minervini_pass,
                w.sector, w.industry, w.avg_daily_volume, w.market_cap,
                w.status,
-               COALESCE(w.latest_price, dp.close) AS latest_price
+               COALESCE(w.latest_price, dp.close) AS latest_price,
+               f.latest_report_date
         FROM watchlist w
         LEFT JOIN (
             SELECT ticker, close,
                    ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY date DESC) AS rn
             FROM daily_prices
         ) dp ON dp.ticker = w.ticker AND dp.rn = 1
+        LEFT JOIN (
+            SELECT ticker, MAX(report_date) AS latest_report_date
+            FROM fundamentals
+            GROUP BY ticker
+        ) f ON f.ticker = w.ticker
         WHERE w.status = 'ACTIVE'
         ORDER BY w.custom_composite_score DESC NULLS LAST
         """
@@ -113,6 +119,7 @@ async def get_watchlist(db: Database = Depends(get_db)) -> dict:
             "market_cap": r[13],
             "status": r[14],
             "latest_price": r[15],
+            "latest_financial_date": r[16],
             "n_value": n_value,
             "avg_volume_50d": avg_volume_50d,
         })
