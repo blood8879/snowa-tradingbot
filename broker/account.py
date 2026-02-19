@@ -21,7 +21,7 @@ from core.models import AccountInfo
 logger = structlog.get_logger(__name__)
 
 ACCOUNT_INFO_CACHE_TTL = 60
-ACCOUNT_INFO_FAIL_CACHE_TTL = 300
+ACCOUNT_INFO_FAIL_CACHE_TTL = 30
 
 
 class AccountManager:
@@ -64,10 +64,9 @@ class AccountManager:
         try:
             psamount = await self._rest.get_purchasable_amount()
             cash = float(psamount.get("ord_psbl_frcr_amt", 0))
-        except Exception:
-            logger.warning("get_purchasable_amount_failed", exc_info=True)
+        except Exception as exc:
+            logger.warning("get_purchasable_amount_failed", error=str(exc), exc_info=True)
 
-        # 2) 보유 종목 평가액: inquire-balance
         total_position_value = 0.0
         try:
             balance = await self._rest.get_balance()
@@ -77,8 +76,8 @@ class AccountManager:
                     continue
                 eval_amt = float(pos.get("ovrs_stck_evlu_amt", 0))
                 total_position_value += eval_amt
-        except Exception:
-            logger.warning("get_balance_failed", exc_info=True)
+        except Exception as exc:
+            logger.warning("get_balance_failed", error=str(exc), exc_info=True)
 
         info = AccountInfo(
             total_equity=cash + total_position_value,

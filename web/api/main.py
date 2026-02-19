@@ -51,7 +51,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     kis_rest: KISRestClient | None = None
     try:
         kis_auth = KISAuth()
-        await kis_auth.refresh_access_token()
+        try:
+            await kis_auth.refresh_access_token()
+            logger.info("kis_token_ready_at_startup")
+        except Exception:
+            logger.warning("kis_token_startup_failed_will_retry_on_request", exc_info=True)
         kis_rest = KISRestClient(kis_auth)
         account_mgr = AccountManager(kis_rest, db)
         set_account_manager(account_mgr)

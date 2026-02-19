@@ -29,14 +29,18 @@ async def _get_live_equity(
         try:
             info = await account_mgr.get_account_info()
             return info.total_equity, info.cash_balance, info.total_positions_value
-        except Exception:
-            logger.warning("live_equity_fetch_failed", exc_info=True)
+        except Exception as exc:
+            logger.warning("live_equity_fetch_failed", error=str(exc), exc_info=True)
+    else:
+        logger.warning("account_manager_not_available")
 
     cursor = await db.conn.execute(
         "SELECT account_equity FROM daily_log ORDER BY date DESC LIMIT 1"
     )
     row = await cursor.fetchone()
     equity = row[0] if row and row[0] is not None else 0.0
+    if equity == 0.0:
+        logger.warning("equity_fallback_zero", has_daily_log=row is not None)
     return equity, 0.0, 0.0
 
 

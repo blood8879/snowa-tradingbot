@@ -32,8 +32,9 @@ logger = structlog.get_logger(__name__)
 TOKEN_REFRESH_BUFFER_SECONDS = 3600
 
 # Retry config for rate-limited token requests (KIS: 1 request per minute)
-_TOKEN_MAX_RETRIES = 3
-_TOKEN_RETRY_DELAY_SECONDS = 65  # slightly over 60s to ensure cooldown
+_TOKEN_MAX_RETRIES = 5
+_TOKEN_RETRY_BASE_DELAY_SECONDS = 65  # slightly over 60s to ensure cooldown
+_TOKEN_RETRY_BACKOFF_FACTOR = 1.5  # exponential backoff: 65 → 97 → 146 → 219 → 328
 
 
 class KISAuth:
@@ -115,33 +116,33 @@ class KISAuth:
         data: dict = {}
 
         for attempt in range(1, _TOKEN_MAX_RETRIES + 1):
+            delay = _TOKEN_RETRY_BASE_DELAY_SECONDS * (
+                _TOKEN_RETRY_BACKOFF_FACTOR ** (attempt - 1)
+            )
             try:
                 async with aiohttp.ClientSession() as session:
                     async with session.post(url, json=body) as resp:
                         if resp.status == 200:
                             data = await resp.json()
-                            break  # Success
+                            break
 
                         text = await resp.text()
 
-                        # Rate limit (EGW00133) → retry after cooldown
                         if resp.status == 403 and "EGW00133" in text:
                             logger.warning(
                                 "kis_token_rate_limited",
                                 attempt=attempt,
                                 max_retries=_TOKEN_MAX_RETRIES,
-                                retry_delay=_TOKEN_RETRY_DELAY_SECONDS,
-                                msg=f"토큰 발급 제한. {_TOKEN_RETRY_DELAY_SECONDS}초 후 재시도합니다.",
+                                retry_delay=int(delay),
                             )
                             last_error = RuntimeError(
                                 f"KIS token rate limited: {resp.status} {text}"
                             )
                             if attempt < _TOKEN_MAX_RETRIES:
-                                await asyncio.sleep(_TOKEN_RETRY_DELAY_SECONDS)
+                                await asyncio.sleep(delay)
                                 continue
                             raise last_error
 
-                        # Other errors → fail immediately (no point retrying)
                         logger.error(
                             "kis_token_request_failed",
                             status=resp.status,
@@ -159,13 +160,12 @@ class KISAuth:
                 )
                 last_error = exc
                 if attempt < _TOKEN_MAX_RETRIES:
-                    await asyncio.sleep(_TOKEN_RETRY_DELAY_SECONDS)
+                    await asyncio.sleep(delay)
                     continue
                 raise RuntimeError(
                     f"KIS token request network error after {_TOKEN_MAX_RETRIES} attempts"
                 ) from exc
         else:
-            # All retries exhausted without break
             raise last_error or RuntimeError("KIS token request failed after all retries")
 
         self._access_token = data["access_token"]
@@ -211,6 +211,9 @@ class KISAuth:
         last_error: Exception | None = None
 
         for attempt in range(1, _TOKEN_MAX_RETRIES + 1):
+            delay = _TOKEN_RETRY_BASE_DELAY_SECONDS * (
+                _TOKEN_RETRY_BACKOFF_FACTOR ** (attempt - 1)
+            )
             try:
                 async with aiohttp.ClientSession() as session:
                     async with session.post(url, json=body) as resp:
@@ -226,13 +229,13 @@ class KISAuth:
                             logger.warning(
                                 "kis_approval_key_rate_limited",
                                 attempt=attempt,
-                                retry_delay=_TOKEN_RETRY_DELAY_SECONDS,
+                                retry_delay=int(delay),
                             )
                             last_error = RuntimeError(
                                 f"KIS approval key rate limited: {resp.status} {text}"
                             )
                             if attempt < _TOKEN_MAX_RETRIES:
-                                await asyncio.sleep(_TOKEN_RETRY_DELAY_SECONDS)
+                                await asyncio.sleep(delay)
                                 continue
                             raise last_error
 
@@ -253,7 +256,7 @@ class KISAuth:
                 )
                 last_error = exc
                 if attempt < _TOKEN_MAX_RETRIES:
-                    await asyncio.sleep(_TOKEN_RETRY_DELAY_SECONDS)
+                    await asyncio.sleep(delay)
                     continue
                 raise RuntimeError(
                     f"KIS approval key network error after {_TOKEN_MAX_RETRIES} attempts"

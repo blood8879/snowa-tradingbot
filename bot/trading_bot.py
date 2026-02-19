@@ -147,8 +147,7 @@ class TradingBot:
         await self._db.initialize()
         await self._mode_mgr.initialize()
 
-        # Step 2: KIS 인증 (최대 3회 시도, 실패 시 2분 대기 후 재시도)
-        await self._initialize_auth_with_retry(max_retries=3, delay_seconds=120)
+        await self._initialize_auth_with_retry(max_retries=5, base_delay=120)
 
         # Step 2.5: 최초 실행 시 시작 잔고 기록
         await self._record_starting_equity()
@@ -260,20 +259,19 @@ class TradingBot:
 
     async def _initialize_auth_with_retry(
         self,
-        max_retries: int = 3,
-        delay_seconds: int = 120,
+        max_retries: int = 5,
+        base_delay: int = 120,
     ) -> None:
-        """KIS 인증 초기화를 재시도 로직과 함께 수행한다.
+        """KIS 인증 초기화 (지수 백오프).
 
-        ``KISAuth.initialize()`` 자체에도 요청별 재시도가 있지만,
-        전체 초기화 프로세스(토큰 + approval key)가 실패할 경우
-        봇 레벨에서 추가로 재시도한다.
+        KIS는 토큰 발급을 1분당 1회로 제한한다.
+        systemd 자동재시작과 겹치면 rate-limit death spiral이 발생하므로
+        봇 레벨에서 지수 백오프로 충분한 대기 시간을 확보한다.
 
-        Args:
-            max_retries: 최대 시도 횟수
-            delay_seconds: 실패 시 대기 시간 (초)
+        백오프: 120 → 240 → 480 → 960 → 1920초 (최대 ~32분)
         """
         for attempt in range(1, max_retries + 1):
+            delay = base_delay * (2 ** (attempt - 1))
             try:
                 await self._auth.initialize()
                 return
@@ -282,15 +280,14 @@ class TradingBot:
                     "auth_initialization_failed",
                     attempt=attempt,
                     max_retries=max_retries,
+                    next_retry_delay=delay,
                     error=str(exc),
-                    msg=f"KIS 인증 실패 ({attempt}/{max_retries}). "
-                        f"{delay_seconds}초 후 재시도합니다.",
                 )
                 if attempt >= max_retries:
                     raise RuntimeError(
-                        f"KIS 인증 {max_retries}회 모두 실패. 봇을 시작할 수 없습니다."
+                        f"KIS auth failed after {max_retries} attempts"
                     ) from exc
-                await asyncio.sleep(delay_seconds)
+                await asyncio.sleep(delay)
 
     # ────────────────────────────────────────────────────────
     # Scheduled Tasks
