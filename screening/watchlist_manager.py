@@ -63,9 +63,9 @@ class WatchlistManager:
         now = datetime.now().isoformat(timespec="seconds")
 
         # ── Step 1: Load tickers ─────────────────────────────
+        universe = UniverseManager()
+        await universe.load_universe()
         if tickers is None:
-            universe = UniverseManager()
-            await universe.load_universe()
             tradeable = universe.filter_tradeable()
             tickers = [s.ticker for s in tradeable]
 
@@ -177,6 +177,7 @@ class WatchlistManager:
             sector = None
             industry = None
             market_cap = None
+            exchange = universe.get_exchange(ticker) if universe else "NASD"
 
             entry = {
                 "ticker": ticker,
@@ -194,6 +195,7 @@ class WatchlistManager:
                 "avg_daily_volume": avg_volume,
                 "market_cap": market_cap,
                 "latest_price": latest_price,
+                "exchange": exchange,
                 "status": "ACTIVE",
             }
             entries.append(entry)
@@ -252,8 +254,8 @@ class WatchlistManager:
                     institutional_holders, institutional_change_pct,
                     custom_composite_score, minervini_pass,
                     sector, industry, avg_daily_volume, market_cap,
-                    status, latest_price
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    status, latest_price, exchange
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     ticker,
@@ -272,6 +274,7 @@ class WatchlistManager:
                     entry.get("market_cap"),
                     "ACTIVE",
                     entry.get("latest_price"),
+                    entry.get("exchange", "NASD"),
                 ),
             )
 

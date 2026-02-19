@@ -52,6 +52,7 @@ CREATE TABLE IF NOT EXISTS watchlist (
     avg_daily_volume INTEGER,
     market_cap REAL,
     latest_price REAL,
+    exchange TEXT DEFAULT 'NASD',
 
     status TEXT DEFAULT 'ACTIVE'
 );
@@ -273,6 +274,8 @@ class Database:
         # Create all tables
         await self._connection.executescript(SCHEMA_SQL)
 
+        await self._run_migrations()
+
         # Record schema version
         await self._connection.execute(
             """
@@ -367,3 +370,13 @@ class Database:
             (table_name,),
         )
         return await cursor.fetchone() is not None
+
+    async def _run_migrations(self) -> None:
+        cursor = await self.conn.execute("PRAGMA table_info(watchlist)")
+        columns = {row[1] for row in await cursor.fetchall()}
+        if "exchange" not in columns:
+            await self.conn.execute(
+                "ALTER TABLE watchlist ADD COLUMN exchange TEXT DEFAULT 'NASD'"
+            )
+            await self.conn.commit()
+            logger.info("migration_applied", migration="add_watchlist_exchange_column")

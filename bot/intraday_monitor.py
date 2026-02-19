@@ -587,17 +587,14 @@ class IntradayMonitor:
     # ────────────────────────────────────────────────────────
 
     async def _resolve_exchange(self, ticker: str) -> str:
-        """종목에 대한 거래소 코드를 반환.
-
-        DB watchlist 에서 조회하거나, 기본값 NASD 사용.
-
-        Args:
-            ticker: 종목 코드.
-
-        Returns:
-            거래소 코드 문자열 (e.g. "NASD", "NYSE", "AMEX").
-        """
-        # watchlist 에서 거래소 정보가 있으면 사용
-        # 현재 watchlist 테이블에는 exchange 컬럼이 없으므로 기본값 사용
-        # TODO: watchlist 에 exchange 컬럼 추가 후 조회 로직 구현
+        try:
+            cursor = await self._db.conn.execute(
+                "SELECT exchange FROM watchlist WHERE ticker = ?",
+                (ticker,),
+            )
+            row = await cursor.fetchone()
+            if row and row[0]:
+                return row[0]
+        except Exception:
+            pass
         return "NASD"
