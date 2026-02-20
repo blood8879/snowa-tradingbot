@@ -10,7 +10,7 @@
 
 WebSocket 프로토콜:
 - 구독 요청: JSON {"header": {...}, "body": {"input": {...}}}
-- 수신 데이터: "0|H0USFASP0|..." 파이프 구분자 형식
+- 수신 데이터: "0|HDFSCNT0|..." 파이프 구분자 형식
 - PINGPONG: 서버가 주기적으로 PING 전송 → PONG 응답 필요
 """
 
@@ -40,6 +40,16 @@ logger = structlog.get_logger(__name__)
 # 콜백 타입: 종목, 가격, 시각을 받는 비동기 함수
 PriceCallback = Callable[[str, float, float], Coroutine[Any, Any, None]]
 
+# REST API 거래소 코드 → WS tr_key 거래소 코드 매핑
+_EXCHANGE_TO_WS: dict[str, str] = {
+    "NASD": "NAS",
+    "NYSE": "NYS",
+    "AMEX": "AMS",
+    "NAS": "NAS",
+    "NYS": "NYS",
+    "AMS": "AMS",
+}
+
 
 class KISWebSocket:
     """
@@ -47,7 +57,7 @@ class KISWebSocket:
 
     사용법:
         ws = KISWebSocket(auth, on_price_update)
-        await ws.start(["AAPL", "NVDA", "TSLA"])
+        await ws.start({"AAPL": "NASD", "CVE": "NYSE"})
         # ... 봇 루프에서 실행
         await ws.stop()
     """
@@ -63,9 +73,11 @@ class KISWebSocket:
         self._ws: Any = None
         self._status = WebSocketStatus.DISCONNECTED
         self._subscribed_tickers: list[str] = []
+        self._ticker_exchange: dict[str, str] = {}
         self._last_message_time: float = 0.0
         self._running = False
         self._reconnect_count = 0
+        self._first_tick_logged = False
 
     @property
     def status(self) -> WebSocketStatus:
@@ -79,13 +91,15 @@ class KISWebSocket:
     # 메인 루프
     # ────────────────────────────────────────────────────────
 
-    async def start(self, tickers: list[str]) -> None:
+    async def start(self, ticker_exchanges: dict[str, str]) -> None:
         """WebSocket 연결 시작 및 종목 구독."""
-        self._subscribed_tickers = tickers
+        self._ticker_exchange = ticker_exchanges
+        self._subscribed_tickers = list(ticker_exchanges.keys())
         self._running = True
         self._reconnect_count = 0
+        self._first_tick_logged = False
 
-        logger.info("ws_starting", tickers=tickers)
+        logger.info("ws_starting", tickers=self._subscribed_tickers)
 
         while self._running:
             try:
@@ -110,7 +124,7 @@ class KISWebSocket:
 
     async def _connect_and_listen(self) -> None:
         """WebSocket 연결 → 구독 → 메시지 수신 루프."""
-        ws_url = self._settings.kis_ws_url + "/tryitout/H0USFASP0"
+        ws_url = self._settings.kis_ws_url + "/tryitout"
 
         async with websockets.connect(ws_url, ping_interval=None) as ws:
             self._ws = ws
@@ -139,46 +153,50 @@ class KISWebSocket:
                 listener.cancel()
                 heartbeat.cancel()
 
-    async def _subscribe(self, ws: Any, ticker: str) -> None:
-        """해외주식 실시간 체결가 구독 요청."""
-        msg = {
-            "header": {
-                "approval_key": self._auth.approval_key,
-                "custtype": "P",
-                "tr_type": "1",       # 1=구독, 2=해제
-                "content-type": "utf-8",
-            },
-            "body": {
-                "input": {
-                    "tr_id": "HDFSCNT0",   # 해외주식 실시간 체결가
-                    "tr_key": ticker,
-                }
-            },
-        }
-        await ws.send(json.dumps(msg))
-        logger.debug("ws_subscribed", ticker=ticker)
+    def _build_tr_key(self, ticker: str) -> str:
+        exchange = self._ticker_exchange.get(ticker, "NASD")
+        ws_exchange = _EXCHANGE_TO_WS.get(exchange, "NAS")
+        return f"D{ws_exchange}{ticker}"
 
-    async def _unsubscribe(self, ws: Any, ticker: str) -> None:
-        """구독 해제."""
+    async def _subscribe(self, ws: Any, ticker: str) -> None:
+        tr_key = self._build_tr_key(ticker)
         msg = {
             "header": {
                 "approval_key": self._auth.approval_key,
                 "custtype": "P",
-                "tr_type": "2",       # 2=해제
+                "tr_type": "1",
                 "content-type": "utf-8",
             },
             "body": {
                 "input": {
                     "tr_id": "HDFSCNT0",
-                    "tr_key": ticker,
+                    "tr_key": tr_key,
                 }
             },
         }
         await ws.send(json.dumps(msg))
-        logger.debug("ws_unsubscribed", ticker=ticker)
+        logger.info("ws_subscribed", ticker=ticker, tr_key=tr_key)
+
+    async def _unsubscribe(self, ws: Any, ticker: str) -> None:
+        tr_key = self._build_tr_key(ticker)
+        msg = {
+            "header": {
+                "approval_key": self._auth.approval_key,
+                "custtype": "P",
+                "tr_type": "2",
+                "content-type": "utf-8",
+            },
+            "body": {
+                "input": {
+                    "tr_id": "HDFSCNT0",
+                    "tr_key": tr_key,
+                }
+            },
+        }
+        await ws.send(json.dumps(msg))
+        logger.debug("ws_unsubscribed", ticker=ticker, tr_key=tr_key)
 
     async def _listen(self, ws: Any) -> None:
-        """WebSocket 메시지 수신 루프."""
         try:
             async for message in ws:
                 self._last_message_time = time.time()
@@ -186,17 +204,14 @@ class KISWebSocket:
                 if isinstance(message, bytes):
                     message = message.decode("utf-8")
 
-                # PINGPONG 처리
                 if "PINGPONG" in message:
-                    await ws.send("PONG")
+                    await ws.send(message)
                     continue
 
-                # JSON 응답 (구독 확인 등)
                 if message.startswith("{"):
                     self._handle_json_response(message)
                     continue
 
-                # 실시간 체결가 데이터 (파이프 구분자)
                 await self._parse_tick_data(message)
 
         except ConnectionClosed:
@@ -204,52 +219,61 @@ class KISWebSocket:
             raise
 
     def _handle_json_response(self, message: str) -> None:
-        """구독 확인 등 JSON 응답 처리."""
         try:
             data = json.loads(message)
             header = data.get("header", {})
             tr_id = header.get("tr_id", "")
-            msg = data.get("body", {}).get("msg1", "")
-            logger.debug("ws_json_response", tr_id=tr_id, msg=msg)
+            tr_key = header.get("tr_key", "")
+            body = data.get("body", {})
+            rt_cd = body.get("rt_cd", "")
+            msg = body.get("msg1", "")
+            logger.info(
+                "ws_json_response",
+                tr_id=tr_id,
+                tr_key=tr_key,
+                rt_cd=rt_cd,
+                msg=msg,
+            )
         except json.JSONDecodeError:
-            logger.debug("ws_json_parse_error", message=message[:100])
+            logger.warning("ws_json_parse_error", message=message[:200])
 
     async def _parse_tick_data(self, message: str) -> None:
-        """
-        실시간 체결가 데이터 파싱.
-
-        형식: "0|H0USFASP0|004|AAPL^150.25^150.30^..."
-        파이프(|)로 헤더와 데이터 구분, 데이터 내부는 ^(캐럿)으로 구분.
-        """
+        """HDFSCNT0 필드: SYMB(0) ZDIV(1) TYMD(2) XYMD(3) XHMS(4) KYMD(5) KHMS(6)
+        OPEN(7) HIGH(8) LOW(9) LAST(10) SIGN(11) DIFF(12) RATE(13)
+        PBID(14) PASK(15) VBID(16) VASK(17) EVOL(18) TVOL(19) TAMT(20)
+        BIVL(21) ASVL(22) STRN(23) MTYP(24)"""
         try:
             parts = message.split("|")
             if len(parts) < 4:
                 return
 
-            # parts[0]: 암호화 여부 (0=평문)
-            # parts[1]: TR_ID
-            # parts[2]: 데이터 건수
-            # parts[3]: 실제 데이터
             tr_id = parts[1]
             data_str = parts[3]
 
-            if tr_id != "H0USFASP0":
+            if tr_id != "HDFSCNT0":
                 return
 
             fields = data_str.split("^")
-            if len(fields) < 3:
+            if len(fields) < 11:
                 return
 
-            # 필드 매핑 (한투 해외주식 실시간 체결가)
-            ticker = fields[0]           # 종목코드
-            current_price = float(fields[2])  # 체결가
-            volume = float(fields[12]) if len(fields) > 12 else 0
+            ticker = fields[0]
+            current_price = float(fields[10])
 
-            # 콜백 호출
+            if not self._first_tick_logged:
+                self._first_tick_logged = True
+                logger.info(
+                    "ws_first_tick_received",
+                    ticker=ticker,
+                    price=current_price,
+                    field_count=len(fields),
+                    raw_preview=message[:200],
+                )
+
             await self._price_callback(ticker, current_price, time.time())
 
         except (ValueError, IndexError) as e:
-            logger.debug("ws_tick_parse_error", error=str(e), message=message[:200])
+            logger.warning("ws_tick_parse_error", error=str(e), message=message[:200])
 
     # ────────────────────────────────────────────────────────
     # 안정성: 하트비트 & 재연결
@@ -288,27 +312,30 @@ class KISWebSocket:
     # 종목 관리
     # ────────────────────────────────────────────────────────
 
-    async def update_subscriptions(self, new_tickers: list[str]) -> None:
-        """구독 종목 변경 (추가/제거)."""
+    async def update_subscriptions(self, new_ticker_exchanges: dict[str, str]) -> None:
         if not self._ws or not self.is_connected:
-            self._subscribed_tickers = new_tickers
+            self._ticker_exchange = new_ticker_exchanges
+            self._subscribed_tickers = list(new_ticker_exchanges.keys())
             return
 
         current = set(self._subscribed_tickers)
-        target = set(new_tickers)
+        target = set(new_ticker_exchanges.keys())
 
         to_add = target - current
         to_remove = current - target
 
         for ticker in to_remove:
             await self._unsubscribe(self._ws, ticker)
+
+        self._ticker_exchange.update(new_ticker_exchanges)
+
         for ticker in to_add:
             await self._subscribe(self._ws, ticker)
 
-        self._subscribed_tickers = new_tickers
+        self._subscribed_tickers = list(new_ticker_exchanges.keys())
         logger.info(
             "ws_subscriptions_updated",
             added=list(to_add),
             removed=list(to_remove),
-            total=len(new_tickers),
+            total=len(new_ticker_exchanges),
         )

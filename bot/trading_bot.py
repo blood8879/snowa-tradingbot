@@ -383,8 +383,10 @@ class TradingBot:
                 logger.warning("intraday_no_tickers")
                 return
 
+            ticker_exchanges = await self._build_ticker_exchange_map(tickers)
+
             self._ws_task = asyncio.create_task(
-                self._websocket.start(tickers),
+                self._websocket.start(ticker_exchanges),
                 name="websocket_listener",
             )
             self._fill_check_task = asyncio.create_task(
@@ -398,8 +400,21 @@ class TradingBot:
         except Exception as e:
             logger.error("intraday_start_failed", error=str(e), exc_info=True)
 
+    async def _build_ticker_exchange_map(self, tickers: list[str]) -> dict[str, str]:
+        result: dict[str, str] = {}
+        for ticker in tickers:
+            try:
+                cursor = await self._db.conn.execute(
+                    "SELECT exchange FROM watchlist WHERE ticker = ?",
+                    (ticker,),
+                )
+                row = await cursor.fetchone()
+                result[ticker] = row[0] if row and row[0] else "NASD"
+            except Exception:
+                result[ticker] = "NASD"
+        return result
+
     async def _fill_check_loop(self) -> None:
-        """장중 60초 간격으로 미체결 주문의 체결 상태를 확인한다."""
         FILL_CHECK_INTERVAL = 60
         try:
             while True:
