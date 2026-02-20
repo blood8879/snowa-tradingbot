@@ -480,48 +480,56 @@ class OrderExecutor:
                     )
 
             elif order.order_type == OrderType.STOP_LOSS and order.side == OrderSide.SELL:
-                if order.status != OrderStatus.FILLED:
-                    logger.info(
-                        "stop_loss_partial_waiting",
-                        ticker=order.ticker,
-                        filled=fill_shares,
-                        requested=order.requested_shares,
-                    )
-                    return
                 position = await self._position_mgr.get_position(order.ticker)
                 if position and position.id is not None:
-                    await self._position_mgr.close_position(
-                        position_id=position.id,
-                        reason=CloseReason.STOP_LOSS.value,
-                        exit_price=fill_price,
-                    )
-                    logger.info("fill_stop_loss_closed", ticker=order.ticker, price=fill_price)
+                    if order.status == OrderStatus.FILLED:
+                        await self._position_mgr.close_position(
+                            position_id=position.id,
+                            reason=CloseReason.STOP_LOSS.value,
+                            exit_price=fill_price,
+                        )
+                        logger.info("fill_stop_loss_closed", ticker=order.ticker, price=fill_price)
+                    else:
+                        await self._position_mgr.reduce_shares(
+                            position_id=position.id,
+                            filled_shares=fill_shares,
+                        )
+                        logger.info(
+                            "stop_loss_partial_reduced",
+                            ticker=order.ticker,
+                            filled=fill_shares,
+                            requested=order.requested_shares,
+                        )
                 else:
                     logger.warning("fill_stop_loss_no_position", ticker=order.ticker)
 
             elif order.order_type == OrderType.EXIT and order.side == OrderSide.SELL:
-                if order.status != OrderStatus.FILLED:
-                    logger.info(
-                        "exit_partial_waiting",
-                        ticker=order.ticker,
-                        filled=fill_shares,
-                        requested=order.requested_shares,
-                    )
-                    return
                 position = await self._position_mgr.get_position(order.ticker)
                 if position and position.id is not None:
                     system = notes.get("system", "S1")
-                    reason = (
-                        CloseReason.SYSTEM1_EXIT.value
-                        if system == "S1"
-                        else CloseReason.SYSTEM2_EXIT.value
-                    )
-                    await self._position_mgr.close_position(
-                        position_id=position.id,
-                        reason=reason,
-                        exit_price=fill_price,
-                    )
-                    logger.info("fill_exit_closed", ticker=order.ticker, price=fill_price)
+                    if order.status == OrderStatus.FILLED:
+                        reason = (
+                            CloseReason.SYSTEM1_EXIT.value
+                            if system == "S1"
+                            else CloseReason.SYSTEM2_EXIT.value
+                        )
+                        await self._position_mgr.close_position(
+                            position_id=position.id,
+                            reason=reason,
+                            exit_price=fill_price,
+                        )
+                        logger.info("fill_exit_closed", ticker=order.ticker, price=fill_price)
+                    else:
+                        await self._position_mgr.reduce_shares(
+                            position_id=position.id,
+                            filled_shares=fill_shares,
+                        )
+                        logger.info(
+                            "exit_partial_reduced",
+                            ticker=order.ticker,
+                            filled=fill_shares,
+                            requested=order.requested_shares,
+                        )
                 else:
                     logger.warning("fill_exit_no_position", ticker=order.ticker)
 

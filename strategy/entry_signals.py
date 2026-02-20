@@ -39,7 +39,7 @@ def check_s1_entry(
 
     Returns a dict describing the signal and any filter outcome.
     """
-    breakout = current_price > donchian_upper_20
+    breakout = current_price >= donchian_upper_20
 
     filtered_out = False
     reason = ""
@@ -85,7 +85,7 @@ def check_s2_entry(
 
     Returns a dict describing the signal.
     """
-    breakout = current_price > donchian_upper_55
+    breakout = current_price >= donchian_upper_55
 
     return {
         "signal": breakout,

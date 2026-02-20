@@ -238,10 +238,15 @@ class KISWebSocket:
             logger.warning("ws_json_parse_error", message=message[:200])
 
     async def _parse_tick_data(self, message: str) -> None:
-        """HDFSCNT0 필드: SYMB(0) ZDIV(1) TYMD(2) XYMD(3) XHMS(4) KYMD(5) KHMS(6)
-        OPEN(7) HIGH(8) LOW(9) LAST(10) SIGN(11) DIFF(12) RATE(13)
-        PBID(14) PASK(15) VBID(16) VASK(17) EVOL(18) TVOL(19) TAMT(20)
-        BIVL(21) ASVL(22) STRN(23) MTYP(24)"""
+        """HDFSCNT0 필드 (KIS 공식 스펙):
+        RSYM(0) SYMB(1) ZDIV(2) TYMD(3) XYMD(4) XHMS(5) KYMD(6) KHMS(7)
+        OPEN(8) HIGH(9) LOW(10) LAST(11) SIGN(12) DIFF(13) RATE(14)
+        PBID(15) PASK(16) VBID(17) VASK(18) EVOL(19) TVOL(20) TAMT(21)
+        BIVL(22) ASVL(23) STRN(24) MTYP(25)
+
+        주의: fields[0]은 RSYM(실시간종목코드, 예: "DNASAAPL")이고,
+              fields[1]이 SYMB(종목코드, 예: "AAPL")이다.
+        """
         try:
             parts = message.split("|")
             if len(parts) < 4:
@@ -254,16 +259,24 @@ class KISWebSocket:
                 return
 
             fields = data_str.split("^")
-            if len(fields) < 11:
+            if len(fields) < 12:
                 return
 
-            ticker = fields[0]
-            current_price = float(fields[10])
+            # fields[0] = RSYM ("DNASAAPL"), fields[1] = SYMB ("AAPL")
+            rsym = fields[0]
+            ticker = fields[1]
+            current_price = float(fields[11])
+
+            # 안전장치: SYMB이 비어있으면 RSYM에서 추출
+            if not ticker and rsym:
+                # RSYM 형식: "D" + exchange(3) + ticker → 4번째 문자부터 추출
+                ticker = rsym[4:] if len(rsym) > 4 else rsym
 
             if not self._first_tick_logged:
                 self._first_tick_logged = True
                 logger.info(
                     "ws_first_tick_received",
+                    rsym=rsym,
                     ticker=ticker,
                     price=current_price,
                     field_count=len(fields),

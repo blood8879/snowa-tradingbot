@@ -337,29 +337,47 @@ class TradingBot:
 
         1. PreMarketPreparer 실행 (토큰/데이터/시그널/마켓필터)
         2. 결과를 인트라데이 모니터에 주입
+        3. 실패 시 최대 3회 재시도 (5분 간격)
         """
         logger.info("pre_market_start")
 
-        try:
-            result = await self._pre_market.run()
+        max_retries = 3
+        retry_delay = 300
 
-            # 사전 계산된 시그널을 인트라데이 모니터에 주입
-            signals = result.get("signals", [])
-            self._intraday.precomputed_signals = {
-                s.ticker: s for s in signals
-            }
-            self._intraday.market_filter_pass = result.get("market_filter_pass", False)
+        for attempt in range(1, max_retries + 1):
+            try:
+                result = await self._pre_market.run()
 
-            logger.info(
-                "pre_market_complete",
-                market_filter=result.get("market_filter_pass"),
-                watchlist=result.get("watchlist_count", 0),
-                positions=result.get("position_count", 0),
-                signals=len(signals),
-            )
+                signals = result.get("signals", [])
+                self._intraday.precomputed_signals = {
+                    s.ticker: s for s in signals
+                }
+                self._intraday.market_filter_pass = result.get("market_filter_pass", False)
 
-        except Exception as e:
-            logger.error("pre_market_failed", error=str(e), exc_info=True)
+                logger.info(
+                    "pre_market_complete",
+                    market_filter=result.get("market_filter_pass"),
+                    watchlist=result.get("watchlist_count", 0),
+                    positions=result.get("position_count", 0),
+                    signals=len(signals),
+                )
+                return
+
+            except Exception as e:
+                logger.error(
+                    "pre_market_failed",
+                    attempt=attempt,
+                    max_retries=max_retries,
+                    error=str(e),
+                    exc_info=True,
+                )
+                if attempt < max_retries:
+                    await asyncio.sleep(retry_delay)
+
+        logger.critical(
+            "pre_market_all_retries_exhausted",
+            max_retries=max_retries,
+        )
 
     async def _start_intraday(self) -> None:
         """장중 모니터링 시작 — KST 23:30 실행.
@@ -380,7 +398,11 @@ class TradingBot:
                     tickers.append(pos.ticker)
 
             if not tickers:
-                logger.warning("intraday_no_tickers")
+                logger.critical(
+                    "intraday_no_tickers_available",
+                    precomputed_signals=len(self._intraday.precomputed_signals),
+                    market_filter=self._intraday.market_filter_pass,
+                )
                 return
 
             ticker_exchanges = await self._build_ticker_exchange_map(tickers)
@@ -415,7 +437,7 @@ class TradingBot:
         return result
 
     async def _fill_check_loop(self) -> None:
-        FILL_CHECK_INTERVAL = 60
+        FILL_CHECK_INTERVAL = 10
         try:
             while True:
                 await asyncio.sleep(FILL_CHECK_INTERVAL)

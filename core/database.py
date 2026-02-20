@@ -339,29 +339,65 @@ class Database:
         ticker: str,
         side: str,
         order_type: str | None = None,
+        max_age_seconds: int = 300,
     ) -> bool:
-        """Check if a SUBMITTED or PARTIAL order exists for this ticker+side."""
+        """Check if a recent SUBMITTED/PARTIAL order exists for this ticker+side.
+
+        Orders older than max_age_seconds with 0 fills are treated as stale
+        and automatically marked FAILED to prevent blocking future orders.
+        """
+        from datetime import datetime, timezone
+
         if order_type:
             cursor = await self.conn.execute(
                 """
-                SELECT 1 FROM orders
+                SELECT id, created_at, filled_shares FROM orders
                 WHERE ticker = ? AND side = ? AND order_type = ?
                   AND status IN ('SUBMITTED', 'PARTIAL')
-                LIMIT 1
                 """,
                 (ticker, side, order_type),
             )
         else:
             cursor = await self.conn.execute(
                 """
-                SELECT 1 FROM orders
+                SELECT id, created_at, filled_shares FROM orders
                 WHERE ticker = ? AND side = ?
                   AND status IN ('SUBMITTED', 'PARTIAL')
-                LIMIT 1
                 """,
                 (ticker, side),
             )
-        return await cursor.fetchone() is not None
+
+        rows = await cursor.fetchall()
+        if not rows:
+            return False
+
+        now = datetime.now(timezone.utc)
+        has_active = False
+        for row in rows:
+            order_id, created_at_str, filled_shares = row
+            filled = filled_shares or 0
+            try:
+                created_at = datetime.fromisoformat(created_at_str)
+                age = (now - created_at).total_seconds()
+            except (ValueError, TypeError):
+                age = 0
+
+            if age > max_age_seconds and filled == 0:
+                await self.conn.execute(
+                    "UPDATE orders SET status = 'FAILED', notes = 'auto_expired_stale' WHERE id = ?",
+                    (order_id,),
+                )
+                await self.conn.commit()
+                logger.info(
+                    "stale_order_expired",
+                    order_id=order_id,
+                    ticker=ticker,
+                    age_seconds=int(age),
+                )
+            else:
+                has_active = True
+
+        return has_active
 
     async def table_exists(self, table_name: str) -> bool:
         """Check if a table exists in the database."""

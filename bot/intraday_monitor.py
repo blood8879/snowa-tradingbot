@@ -144,6 +144,9 @@ class IntradayMonitor:
 
         # ── Priority 2: 피라미딩 체크 ──
         if position is not None and position.can_add_unit:
+            if await self._db.has_submitted_order(ticker, "SELL"):
+                return
+
             last_unit = position.units[-1] if position.units else None
             if last_unit is not None:
                 pyramid_result = check_pyramid_signal(
@@ -393,7 +396,6 @@ class IntradayMonitor:
             logger.info("entry_skipped_pending_order", ticker=ticker)
             return
 
-        # 계좌 잔고 조회
         try:
             account_info = await self._rest.get_balance()
             summary = account_info.get("summary", {}) if isinstance(account_info, dict) else {}
@@ -401,7 +403,10 @@ class IntradayMonitor:
         except Exception:
             logger.exception("entry_balance_fetch_failed", ticker=ticker)
             return
-        account_equity = cash  # 신규 진입 시 총 자산 기준
+
+        open_positions = await self._position_mgr.get_open_positions()
+        total_position_value = sum(p.total_cost for p in open_positions)
+        account_equity = cash + total_position_value
 
         # 포지션 사이징
         sizing = calculate_unit_shares(

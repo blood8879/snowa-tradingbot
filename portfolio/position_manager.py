@@ -281,6 +281,44 @@ class PositionManager:
             total_shares=total_shares,
         )
 
+    async def reduce_shares(
+        self,
+        position_id: int,
+        filled_shares: int,
+    ) -> None:
+        """Reduce position share count after partial sell fill."""
+        conn = self._db.conn
+
+        cursor = await conn.execute(
+            "SELECT total_shares, total_cost, avg_entry_price FROM positions WHERE id = ?",
+            (position_id,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return
+
+        old_shares, old_cost, avg_price = row
+        remaining = max(0, old_shares - filled_shares)
+        remaining_cost = remaining * avg_price if remaining > 0 else 0.0
+
+        await conn.execute(
+            """
+            UPDATE positions
+            SET total_shares = ?, total_cost = ?
+            WHERE id = ?
+            """,
+            (remaining, remaining_cost, position_id),
+        )
+        await conn.commit()
+
+        logger.info(
+            "position_shares_reduced",
+            position_id=position_id,
+            old_shares=old_shares,
+            sold_shares=filled_shares,
+            remaining=remaining,
+        )
+
     # ── Pyramid Units ────────────────────────────────────────
 
     async def add_unit(

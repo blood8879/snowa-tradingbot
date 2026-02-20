@@ -58,16 +58,16 @@ def check_donchian_exit(
                 "exit_level": 0.0,
                 "reason": f"S1 Donchian {SYSTEM1_EXIT_DAYS}-day low not available",
             }
-        triggered = current_price < donchian_lower_10
+        triggered = current_price <= donchian_lower_10
         return {
             "exit": triggered,
             "system": system,
             "exit_level": donchian_lower_10,
             "reason": (
-                f"S1 exit: price {current_price:.2f} < "
+                f"S1 exit: price {current_price:.2f} <= "
                 f"{SYSTEM1_EXIT_DAYS}-day low {donchian_lower_10:.2f}"
                 if triggered
-                else f"S1 hold: price {current_price:.2f} >= "
+                else f"S1 hold: price {current_price:.2f} > "
                 f"{SYSTEM1_EXIT_DAYS}-day low {donchian_lower_10:.2f}"
             ),
         }
@@ -80,16 +80,16 @@ def check_donchian_exit(
                 "exit_level": 0.0,
                 "reason": f"S2 Donchian {SYSTEM2_EXIT_DAYS}-day low not available",
             }
-        triggered = current_price < donchian_lower_20
+        triggered = current_price <= donchian_lower_20
         return {
             "exit": triggered,
             "system": system,
             "exit_level": donchian_lower_20,
             "reason": (
-                f"S2 exit: price {current_price:.2f} < "
+                f"S2 exit: price {current_price:.2f} <= "
                 f"{SYSTEM2_EXIT_DAYS}-day low {donchian_lower_20:.2f}"
                 if triggered
-                else f"S2 hold: price {current_price:.2f} >= "
+                else f"S2 hold: price {current_price:.2f} > "
                 f"{SYSTEM2_EXIT_DAYS}-day low {donchian_lower_20:.2f}"
             ),
         }
