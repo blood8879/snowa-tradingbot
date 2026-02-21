@@ -120,6 +120,7 @@ class TradingBot:
         self._websocket = KISWebSocket(
             auth=self._auth,
             price_callback=self._intraday.on_price_update,
+            rest_client=self._rest,
         )
 
         # ── Scheduler ──

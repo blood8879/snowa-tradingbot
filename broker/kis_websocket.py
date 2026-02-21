@@ -66,10 +66,12 @@ class KISWebSocket:
         self,
         auth: KISAuth,
         price_callback: PriceCallback,
+        rest_client: Any = None,
     ) -> None:
         self._auth = auth
         self._settings = get_settings()
         self._price_callback = price_callback
+        self._rest_client = rest_client
         self._ws: Any = None
         self._status = WebSocketStatus.DISCONNECTED
         self._subscribed_tickers: list[str] = []
@@ -78,6 +80,7 @@ class KISWebSocket:
         self._running = False
         self._reconnect_count = 0
         self._first_tick_logged = False
+        self._rest_fallback_active = False
 
     @property
     def status(self) -> WebSocketStatus:
@@ -98,17 +101,41 @@ class KISWebSocket:
         self._running = True
         self._reconnect_count = 0
         self._first_tick_logged = False
+        self._rest_fallback_active = False
 
         logger.info("ws_starting", tickers=self._subscribed_tickers)
 
+        rest_fallback_task: asyncio.Task | None = None
+
         while self._running:
             try:
+                # WS 연결 성공 → REST 폴백 중지
+                if rest_fallback_task and not rest_fallback_task.done():
+                    rest_fallback_task.cancel()
+                    self._rest_fallback_active = False
+                    logger.info("ws_rest_fallback_stopped", reason="ws_reconnected")
+
                 await self._connect_and_listen()
             except Exception as e:
                 if not self._running:
                     break
                 logger.error("ws_connection_error", error=str(e))
+
+                # 3회 연속 실패 시 REST 폴백 시작
+                if (
+                    self._rest_client
+                    and self._reconnect_count >= 3
+                    and not self._rest_fallback_active
+                ):
+                    rest_fallback_task = asyncio.create_task(
+                        self._rest_fallback_polling()
+                    )
+
                 await self._handle_reconnect()
+
+        # 종료 시 폴백 정리
+        if rest_fallback_task and not rest_fallback_task.done():
+            rest_fallback_task.cancel()
 
     async def stop(self) -> None:
         """WebSocket 연결 종료."""
@@ -320,6 +347,43 @@ class KISWebSocket:
         )
 
         await asyncio.sleep(delay)
+
+    async def _rest_fallback_polling(self) -> None:
+        """REST API 폴링 폴백 — WebSocket 장애 시 30초 간격 현재가 조회."""
+        self._rest_fallback_active = True
+        logger.warning(
+            "ws_rest_fallback_started",
+            interval=WS_REST_FALLBACK_INTERVAL,
+            ticker_count=len(self._subscribed_tickers),
+        )
+
+        try:
+            while self._running and not self.is_connected:
+                for ticker in self._subscribed_tickers:
+                    if self.is_connected:
+                        break
+                    try:
+                        exchange = self._ticker_exchange.get(ticker, "NASD")
+                        price_data = await self._rest_client.get_current_price(
+                            ticker, exchange
+                        )
+                        current_price = float(price_data.get("last", 0) or price_data.get("stck_prpr", 0) or 0)
+                        if current_price > 0:
+                            await self._price_callback(
+                                ticker, current_price, time.time()
+                            )
+                    except Exception:
+                        logger.debug(
+                            "rest_fallback_tick_failed",
+                            ticker=ticker,
+                            exc_info=True,
+                        )
+                await asyncio.sleep(WS_REST_FALLBACK_INTERVAL)
+        except asyncio.CancelledError:
+            pass
+        finally:
+            self._rest_fallback_active = False
+            logger.info("ws_rest_fallback_ended")
 
     # ────────────────────────────────────────────────────────
     # 종목 관리

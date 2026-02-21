@@ -136,44 +136,115 @@ class AccountManager:
         """
         브로커 보유 종목과 로컬 DB 포지션을 비교/동기화.
 
-        봇 재시작, 크래시 복구 시 호출.
+        - db_only → CLOSED 처리 (브로커에 없으므로 이미 청산됨)
+        - broker_only → OPEN 포지션 신규 생성 (크래시 복구)
+        - matched → 수량 불일치 시 DB 업데이트
 
         Returns:
-            동기화 결과: {"matched": N, "broker_only": [...], "db_only": [...]}
+            동기화 결과 dict
         """
-        broker_positions = await self.get_broker_positions()
-        broker_tickers = {p["ticker"] for p in broker_positions}
+        from datetime import datetime, timezone
 
-        # DB에서 OPEN 포지션 조회
+        broker_positions = await self.get_broker_positions()
+        broker_map = {p["ticker"]: p for p in broker_positions}
+        broker_tickers = set(broker_map.keys())
+
         cursor = await self._db.conn.execute(
-            "SELECT ticker FROM positions WHERE status = 'OPEN'"
+            "SELECT id, ticker, total_shares FROM positions WHERE status = 'OPEN'"
         )
         rows = await cursor.fetchall()
-        db_tickers = {row[0] for row in rows}
+        db_map = {row[1]: {"id": row[0], "shares": row[2]} for row in rows}
+        db_tickers = set(db_map.keys())
 
         matched = broker_tickers & db_tickers
         broker_only = broker_tickers - db_tickers
         db_only = db_tickers - broker_tickers
 
+        now_str = datetime.now(timezone.utc).isoformat()
+        fixed_db_only = 0
+        fixed_broker_only = 0
+        fixed_qty_mismatch = 0
+
+        # ── db_only: DB에만 있고 브로커에 없음 → CLOSED 처리 ──
+        for ticker in db_only:
+            pos_info = db_map[ticker]
+            await self._db.conn.execute(
+                """UPDATE positions
+                   SET status = 'CLOSED', closed_at = ?, close_reason = 'sync_broker_missing'
+                   WHERE id = ?""",
+                (now_str, pos_info["id"]),
+            )
+            fixed_db_only += 1
+            logger.warning(
+                "sync_closed_db_only",
+                ticker=ticker,
+                position_id=pos_info["id"],
+                msg="브로커에 없는 포지션 → CLOSED 처리",
+            )
+
+        # ── broker_only: 브로커에만 있고 DB에 없음 → OPEN 생성 ──
+        for ticker in broker_only:
+            bp = broker_map[ticker]
+            qty = bp["quantity"]
+            avg_price = bp["avg_price"]
+            total_cost = avg_price * qty
+            # 스톱 가격은 10% 고정 (정확한 ATR 없으므로)
+            stop_price = avg_price * 0.90
+
+            await self._db.conn.execute(
+                """INSERT INTO positions
+                   (ticker, system, status, total_shares, total_cost,
+                    avg_entry_price, current_stop_price, n_at_entry,
+                    sector, industry, opened_at)
+                   VALUES (?, 'S1', 'OPEN', ?, ?, ?, ?, 0, ?, ?, ?)""",
+                (ticker, qty, total_cost, avg_price, stop_price,
+                 bp.get("sector"), bp.get("industry"), now_str),
+            )
+            fixed_broker_only += 1
+            logger.warning(
+                "sync_created_broker_only",
+                ticker=ticker,
+                quantity=qty,
+                avg_price=avg_price,
+                msg="DB에 없는 브로커 포지션 → OPEN 생성",
+            )
+
+        # ── matched: 수량 불일치 시 DB 업데이트 ──
+        for ticker in matched:
+            db_shares = db_map[ticker]["shares"]
+            broker_shares = broker_map[ticker]["quantity"]
+            if db_shares != broker_shares:
+                bp = broker_map[ticker]
+                new_cost = bp["avg_price"] * broker_shares
+                await self._db.conn.execute(
+                    """UPDATE positions
+                       SET total_shares = ?, total_cost = ?, avg_entry_price = ?
+                       WHERE id = ?""",
+                    (broker_shares, new_cost, bp["avg_price"], db_map[ticker]["id"]),
+                )
+                fixed_qty_mismatch += 1
+                logger.warning(
+                    "sync_qty_mismatch_fixed",
+                    ticker=ticker,
+                    db_shares=db_shares,
+                    broker_shares=broker_shares,
+                )
+
+        if fixed_db_only or fixed_broker_only or fixed_qty_mismatch:
+            await self._db.conn.commit()
+
         result = {
             "matched": len(matched),
             "broker_only": list(broker_only),
             "db_only": list(db_only),
+            "fixed_db_only": fixed_db_only,
+            "fixed_broker_only": fixed_broker_only,
+            "fixed_qty_mismatch": fixed_qty_mismatch,
         }
 
-        if broker_only:
-            logger.warning(
-                "sync_broker_only",
-                tickers=list(broker_only),
-                msg="브로커에만 존재하는 포지션 (DB에 없음)",
-            )
-        if db_only:
-            logger.warning(
-                "sync_db_only",
-                tickers=list(db_only),
-                msg="DB에만 존재하는 포지션 (브로커에 없음)",
-            )
-        if not broker_only and not db_only:
+        if not broker_only and not db_only and not fixed_qty_mismatch:
             logger.info("sync_positions_ok", matched=len(matched))
+        else:
+            logger.info("sync_positions_reconciled", **result)
 
         return result

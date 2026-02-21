@@ -30,7 +30,7 @@ from portfolio.position_sizer import calculate_unit_shares
 from portfolio.risk_manager import RiskManager
 from strategy.breakout_tracker import BreakoutTracker
 from strategy.entry_signals import check_entry_signals
-from strategy.exit_signals import check_donchian_exit
+from strategy.exit_signals import check_donchian_exit, should_check_donchian_exit
 from strategy.pyramiding import check_pyramid_signal
 from strategy.stop_loss import check_stop_hit, update_stop_on_pyramid
 from bot.journal_context import (
@@ -580,6 +580,14 @@ class IntradayMonitor:
         """
         if await self._db.has_submitted_order(ticker, "SELL", "EXIT"):
             logger.info("donchian_exit_skipped_pending_order", ticker=ticker)
+            return
+
+        # Donchian 청산은 장 마감 15분 전부터만 체크 (장중 일시적 하락에 의한 조기 청산 방지)
+        from datetime import datetime, timezone, timedelta
+
+        us_eastern = timezone(timedelta(hours=-5))
+        now_et = datetime.now(us_eastern)
+        if not should_check_donchian_exit(now_et.hour, now_et.minute):
             return
 
         system = position.system.value if hasattr(position.system, "value") else str(position.system)  # type: ignore[attr-defined]
