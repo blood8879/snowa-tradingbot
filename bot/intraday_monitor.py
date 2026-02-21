@@ -82,6 +82,8 @@ class IntradayMonitor:
         self.precomputed_signals: dict[str, PrecomputedSignals] = {}
         self.market_filter_pass: bool = False
         self._running: bool = False
+        # 진입 차단 로그 중복 방지용 (틱마다 로그 남기지 않도록)
+        self._entry_blocked_logged: set[str] = set()
 
     # ────────────────────────────────────────────────────────
     # Lifecycle
@@ -90,11 +92,17 @@ class IntradayMonitor:
     async def start(self) -> None:
         """모니터링 시작."""
         self._running = True
+        self._entry_blocked_logged = set()
         logger.info(
             "intraday_monitor_started",
             watchlist_count=len(self.precomputed_signals),
             market_filter=self.market_filter_pass,
         )
+        if not self.market_filter_pass:
+            logger.warning(
+                "intraday_market_filter_off",
+                msg="SPY < 200MA — 모든 신규 진입이 차단됩니다",
+            )
 
     async def stop(self) -> None:
         """모니터링 중지."""
@@ -162,25 +170,54 @@ class IntradayMonitor:
                     return
 
         # ── Priority 3: 신규 진입 체크 ──
-        if position is None and self.market_filter_pass:
-            # 이전 S1 돌파 결과 조회 (System 1 필터)
-            last_s1_winner = await self._breakout_tracker.was_last_breakout_winner(ticker)
+        if position is None:
+            if not self.market_filter_pass:
+                # 마켓필터 차단 시에도 돌파 여부를 확인하여 로그 남김 (종목당 1회)
+                if ticker not in self._entry_blocked_logged:
+                    at_breakout = (
+                        price >= signals.donchian.upper_20
+                        or price >= signals.donchian.upper_55
+                    )
+                    if at_breakout:
+                        self._entry_blocked_logged.add(ticker)
+                        logger.warning(
+                            "entry_blocked_market_filter",
+                            ticker=ticker,
+                            price=price,
+                            s1_level=signals.donchian.upper_20,
+                            s2_level=signals.donchian.upper_55,
+                            msg="돌파 감지되었으나 SPY < 200MA로 진입 차단",
+                        )
+            else:
+                # 이전 S1 돌파 결과 조회 (System 1 필터)
+                last_s1_winner = await self._breakout_tracker.was_last_breakout_winner(ticker)
 
-            donchian_levels: dict[str, float | None] = {
-                "upper_20": signals.donchian.upper_20,
-                "upper_55": signals.donchian.upper_55,
-            }
-            entry_signals = check_entry_signals(
-                current_price=price,
-                donchian_levels=donchian_levels,
-                last_s1_breakout_winner=last_s1_winner,
-                market_filter_pass=self.market_filter_pass,
-            )
-            if entry_signals:
-                await self._execute_entry(
-                    ticker, price, signals, entry_signals[0], timestamp,
+                donchian_levels: dict[str, float | None] = {
+                    "upper_20": signals.donchian.upper_20,
+                    "upper_55": signals.donchian.upper_55,
+                }
+                entry_signals = check_entry_signals(
+                    current_price=price,
+                    donchian_levels=donchian_levels,
+                    last_s1_breakout_winner=last_s1_winner,
+                    market_filter_pass=self.market_filter_pass,
                 )
-                return
+                if entry_signals:
+                    await self._execute_entry(
+                        ticker, price, signals, entry_signals[0], timestamp,
+                    )
+                    return
+                elif price >= signals.donchian.upper_20 and ticker not in self._entry_blocked_logged:
+                    # S1 필터에 의해 차단된 경우 로그
+                    self._entry_blocked_logged.add(ticker)
+                    logger.info(
+                        "entry_blocked_s1_filter",
+                        ticker=ticker,
+                        price=price,
+                        s1_level=signals.donchian.upper_20,
+                        last_s1_winner=last_s1_winner,
+                        msg="S1 돌파 감지되었으나 이전 돌파가 수익 → S1 필터로 스킵",
+                    )
 
         # ── Priority 4: Donchian 청산 체크 (매 틱마다) ──
         if position is not None:
