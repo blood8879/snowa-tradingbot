@@ -21,6 +21,7 @@ Korea Investment Securities REST API Client.
 from __future__ import annotations
 
 import asyncio
+import time
 from datetime import datetime
 from typing import Any
 
@@ -50,17 +51,27 @@ TR_ORDER_SELL = {"live": "JTTT1006U", "paper": "VTTT1006U"}
 # 해외주식 정정/취소
 TR_ORDER_MODIFY = {"live": "JTTT1004U", "paper": "VTTT1004U"}
 
-# 해외주식 미체결 내역
-TR_UNFILLED = {"live": "TTTS3018R", "paper": "VTTS3018R"}
+# 해외주식 미체결 내역 (주간/야간)
+TR_UNFILLED_DAY = {"live": "TTTS3018R", "paper": "VTTS3018R"}
+TR_UNFILLED_NIGHT = {"live": "JTTT3018R", "paper": "VTTT3018R"}
 
-# 해외주식 잔고
-TR_BALANCE = {"live": "TTTS3012R", "paper": "VTTS3012R"}
+# 해외주식 잔고 (주간/야간)
+TR_BALANCE_DAY = {"live": "TTTS3012R", "paper": "VTTS3012R"}
+TR_BALANCE_NIGHT = {"live": "JTTT3012R", "paper": "VTTT3012R"}
 
-# 해외주식 체결 내역
-TR_FILLED = {"live": "TTTS3035R", "paper": "VTTS3035R"}
+# 해외주식 체결 내역 (주간/야간)
+TR_FILLED_DAY = {"live": "TTTS3035R", "paper": "VTTS3035R"}
+TR_FILLED_NIGHT = {"live": "JTTT3035R", "paper": "VTTT3035R"}
 
-# 해외주식 매수가능금액조회
-TR_PSAMOUNT = {"live": "TTTS3007R", "paper": "VTTS3007R"}
+# 해외주식 매수가능금액조회 (주간/야간)
+TR_PSAMOUNT_DAY = {"live": "TTTS3007R", "paper": "VTTS3007R"}
+TR_PSAMOUNT_NIGHT = {"live": "JTTT3007R", "paper": "VTTT3007R"}
+
+# 해외주식 주야간원장구분 조회
+TR_DAYORNIGHT = {"live": "JTTT3010R", "paper": "VTTT3010R"}
+
+# 주야간 캐시 TTL (초)
+_DAYORNIGHT_CACHE_TTL = 300  # 5분
 
 # 거래소 코드 → 한투 API 거래소 코드
 EXCHANGE_MAP: dict[str, str] = {
@@ -88,6 +99,8 @@ class KISRestClient:
         self._auth = auth
         self._settings = get_settings()
         self._session: aiohttp.ClientSession | None = None
+        self._dayornight_cache: str | None = None
+        self._dayornight_cache_ts: float = 0.0
 
     async def _ensure_session(self) -> aiohttp.ClientSession:
         """aiohttp 세션을 가져오거나 생성."""
@@ -104,6 +117,106 @@ class KISRestClient:
         """현재 트레이딩 모드에 맞는 TR_ID 반환."""
         mode = "paper" if self._settings.is_paper else "live"
         return tr_map[mode]
+
+    def _estimate_day_or_night_by_time(self) -> str:
+        """시간 기반 주야간 판단 (API 폴백용).
+
+        US 정규장: ET 09:30–16:00 → KIS 야간(night)
+        그 외 시간 → KIS 주간(day)
+        """
+        from zoneinfo import ZoneInfo
+
+        now_et = datetime.now(ZoneInfo("America/New_York"))
+        hour, minute = now_et.hour, now_et.minute
+        # US 정규장 09:30 ~ 16:00 = 야간
+        if (hour > 9 or (hour == 9 and minute >= 30)) and hour < 16:
+            return "night"
+        return "day"
+
+    async def _check_day_or_night(self) -> str:
+        """주야간원장구분 조회 (5분 캐시).
+
+        KIS API ``/uapi/overseas-stock/v1/trading/dayornight`` 호출.
+        ``output.PSBL_YN`` — 'Y'=야간(미국장 오픈), 'N'=주간(미국장 마감).
+
+        모의투자는 주야간 API가 없으므로 시간 기반 판단으로 폴백.
+        API 실패 시에도 시간 기반으로 판단 (야간 하드코딩 제거).
+
+        Returns:
+            ``"night"`` 또는 ``"day"``
+        """
+        now = time.monotonic()
+        if (
+            self._dayornight_cache is not None
+            and (now - self._dayornight_cache_ts) < _DAYORNIGHT_CACHE_TTL
+        ):
+            return self._dayornight_cache
+
+        # 모의투자: dayornight API 자체가 없으므로 시간 기반 판단
+        if self._settings.is_paper:
+            result = self._estimate_day_or_night_by_time()
+            self._dayornight_cache = result
+            self._dayornight_cache_ts = now
+            logger.debug("dayornight_paper_time_based", result=result)
+            return result
+
+        try:
+            await self._auth.ensure_token_valid()
+            session = await self._ensure_session()
+
+            tr_id = self._get_tr_id(TR_DAYORNIGHT)
+            url = f"{self._settings.kis_rest_base_url}/uapi/overseas-stock/v1/trading/dayornight"
+            headers = self._auth.get_auth_headers(tr_id)
+            params = {
+                "CANO": self._settings.account_number,
+                "ACNT_PRDT_CD": self._settings.account_product_code,
+            }
+
+            async with session.get(url, headers=headers, params=params) as resp:
+                data = await resp.json()
+
+            rt_cd = data.get("rt_cd", "")
+            if rt_cd != "0":
+                logger.warning(
+                    "dayornight_api_error",
+                    rt_cd=rt_cd,
+                    msg=data.get("msg1", ""),
+                )
+                result = self._estimate_day_or_night_by_time()
+                self._dayornight_cache = result
+                self._dayornight_cache_ts = now
+                return result
+
+            psbl_yn = data.get("output", {}).get("PSBL_YN", "Y")
+            result = "night" if psbl_yn == "Y" else "day"
+
+            self._dayornight_cache = result
+            self._dayornight_cache_ts = now
+
+            logger.debug("dayornight_checked", result=result, psbl_yn=psbl_yn)
+            return result
+
+        except Exception as e:
+            logger.warning("dayornight_api_failed", error=str(e))
+            result = self._estimate_day_or_night_by_time()
+            self._dayornight_cache = result
+            self._dayornight_cache_ts = now
+            return result
+
+    async def _get_overseas_tr_id(
+        self,
+        day_map: dict[str, str],
+        night_map: dict[str, str],
+    ) -> str:
+        """주야간 세션에 따라 올바른 해외주식 조회 TR_ID 반환.
+
+        모의투자(paper)는 야간 전용 TR_ID가 없으므로 항상 주간 TR 사용.
+        """
+        if self._settings.is_paper:
+            return self._get_tr_id(day_map)
+        session_type = await self._check_day_or_night()
+        tr_map = night_map if session_type == "night" else day_map
+        return self._get_tr_id(tr_map)
 
     async def _request(
         self,
@@ -226,9 +339,9 @@ class KISRestClient:
             "AUTH": "",
             "EXCD": exchange,
             "SYMB": ticker,
-            "GUBN": "0",      # 0=일봉, 1=주봉, 2=월봉
+            "GUBN": "0",  # 0=일봉, 1=주봉, 2=월봉
             "BYMD": end_date,  # 공백이면 최신
-            "MODP": "0",       # 0=수정주가 반영 안 함
+            "MODP": "0",  # 0=수정주가 반영 안 함
         }
         if period == "W":
             params["GUBN"] = "1"
@@ -469,22 +582,36 @@ class KISRestClient:
     # ────────────────────────────────────────────────────────
 
     async def get_unfilled_orders(self) -> list[dict[str, Any]]:
-        """해외주식 미체결 주문 조회."""
-        params = {
-            "CANO": self._settings.account_number,
-            "ACNT_PRDT_CD": self._settings.account_product_code,
-            "OVRS_EXCG_CD": "NASD",  # 전체 조회 시에도 하나 지정 필요
-            "SORT_SQN": "DS",        # 정렬순서: DS=최신순
-            "CTX_AREA_FK200": "",
-            "CTX_AREA_NK200": "",
-        }
-        data = await self._request(
-            "GET",
-            "/uapi/overseas-stock/v1/trading/inquire-nccs",
-            self._get_tr_id(TR_UNFILLED),
-            params=params,
-        )
-        return data.get("output", [])
+        """해외주식 미체결 주문 조회 — 전 거래소(NASD/NYSE/AMEX)."""
+        all_orders: list[dict[str, Any]] = []
+        seen_odno: set[str] = set()
+        tr_id = await self._get_overseas_tr_id(TR_UNFILLED_DAY, TR_UNFILLED_NIGHT)
+
+        for exchange in ("NASD", "NYSE", "AMEX"):
+            try:
+                params = {
+                    "CANO": self._settings.account_number,
+                    "ACNT_PRDT_CD": self._settings.account_product_code,
+                    "OVRS_EXCG_CD": exchange,
+                    "SORT_SQN": "DS",
+                    "CTX_AREA_FK200": "",
+                    "CTX_AREA_NK200": "",
+                }
+                data = await self._request(
+                    "GET",
+                    "/uapi/overseas-stock/v1/trading/inquire-nccs",
+                    tr_id,
+                    params=params,
+                )
+                for order in data.get("output", []):
+                    odno = order.get("odno", "")
+                    if odno and odno not in seen_odno:
+                        seen_odno.add(odno)
+                        all_orders.append(order)
+            except Exception:
+                logger.warning("unfilled_query_failed", exchange=exchange, exc_info=True)
+
+        return all_orders
 
     async def get_filled_orders(
         self,
@@ -492,7 +619,7 @@ class KISRestClient:
         end_date: str = "",
     ) -> list[dict[str, Any]]:
         """
-        해외주식 체결 내역 조회.
+        해외주식 체결 내역 조회 — 전 거래소(NASD/NYSE/AMEX).
 
         Args:
             start_date: 조회 시작일 (YYYYMMDD)
@@ -503,26 +630,40 @@ class KISRestClient:
         if not end_date:
             end_date = start_date
 
-        params = {
-            "CANO": self._settings.account_number,
-            "ACNT_PRDT_CD": self._settings.account_product_code,
-            "PDNO": "",               # 공백=전종목
-            "ORD_STRT_DT": start_date,
-            "ORD_END_DT": end_date,
-            "SLL_BUY_DVSN": "00",     # 00=전체
-            "CCLD_NCCS_DVSN": "01",   # 01=체결만
-            "OVRS_EXCG_CD": "NASD",
-            "SORT_SQN": "DS",
-            "CTX_AREA_FK200": "",
-            "CTX_AREA_NK200": "",
-        }
-        data = await self._request(
-            "GET",
-            "/uapi/overseas-stock/v1/trading/inquire-ccnl",
-            self._get_tr_id(TR_FILLED),
-            params=params,
-        )
-        return data.get("output", [])
+        all_fills: list[dict[str, Any]] = []
+        seen_odno: set[str] = set()
+        tr_id = await self._get_overseas_tr_id(TR_FILLED_DAY, TR_FILLED_NIGHT)
+
+        for exchange in ("NASD", "NYSE", "AMEX"):
+            try:
+                params = {
+                    "CANO": self._settings.account_number,
+                    "ACNT_PRDT_CD": self._settings.account_product_code,
+                    "PDNO": "",
+                    "ORD_STRT_DT": start_date,
+                    "ORD_END_DT": end_date,
+                    "SLL_BUY_DVSN": "00",
+                    "CCLD_NCCS_DVSN": "01",
+                    "OVRS_EXCG_CD": exchange,
+                    "SORT_SQN": "DS",
+                    "CTX_AREA_FK200": "",
+                    "CTX_AREA_NK200": "",
+                }
+                data = await self._request(
+                    "GET",
+                    "/uapi/overseas-stock/v1/trading/inquire-ccnl",
+                    tr_id,
+                    params=params,
+                )
+                for fill in data.get("output", []):
+                    odno = fill.get("odno", "")
+                    if odno and odno not in seen_odno:
+                        seen_odno.add(odno)
+                        all_fills.append(fill)
+            except Exception:
+                logger.warning("filled_query_failed", exchange=exchange, exc_info=True)
+
+        return all_fills
 
     async def get_balance(self) -> dict[str, Any]:
         """
@@ -542,10 +683,11 @@ class KISRestClient:
             "CTX_AREA_FK200": "",
             "CTX_AREA_NK200": "",
         }
+        tr_id = await self._get_overseas_tr_id(TR_BALANCE_DAY, TR_BALANCE_NIGHT)
         data = await self._request(
             "GET",
             "/uapi/overseas-stock/v1/trading/inquire-balance",
-            self._get_tr_id(TR_BALANCE),
+            tr_id,
             params=params,
         )
         # 한투 API 응답 형식 정규화:
@@ -586,10 +728,11 @@ class KISRestClient:
             "OVRS_ORD_UNPR": price,
             "ITEM_CD": ticker,
         }
+        tr_id = await self._get_overseas_tr_id(TR_PSAMOUNT_DAY, TR_PSAMOUNT_NIGHT)
         data = await self._request(
             "GET",
             "/uapi/overseas-stock/v1/trading/inquire-psamount",
-            self._get_tr_id(TR_PSAMOUNT),
+            tr_id,
             params=params,
         )
         return data.get("output", {})
@@ -615,8 +758,21 @@ class KISRestClient:
         """
         # 일부 대형주 하드코딩 (나머지는 유니버스 DB에서 조회)
         nyse_known = {
-            "BRK.A", "BRK.B", "JPM", "V", "JNJ", "WMT", "PG",
-            "UNH", "HD", "BAC", "MA", "DIS", "KO", "PFE", "MRK",
+            "BRK.A",
+            "BRK.B",
+            "JPM",
+            "V",
+            "JNJ",
+            "WMT",
+            "PG",
+            "UNH",
+            "HD",
+            "BAC",
+            "MA",
+            "DIS",
+            "KO",
+            "PFE",
+            "MRK",
         }
         if ticker in nyse_known:
             return "NYSE"

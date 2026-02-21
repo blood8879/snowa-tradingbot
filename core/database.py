@@ -115,10 +115,12 @@ CREATE TABLE IF NOT EXISTS positions (
     opened_at TEXT NOT NULL,
     closed_at TEXT,
     close_reason TEXT,
-    realized_pnl REAL,
-
-    UNIQUE(ticker, status)
+    realized_pnl REAL
 );
+
+-- 동일 종목 동시 OPEN 방지 (CLOSED는 복수 허용)
+CREATE UNIQUE INDEX IF NOT EXISTS idx_positions_ticker_open
+    ON positions(ticker) WHERE status = 'OPEN';
 
 -- ===================================================================
 -- 5. Units (individual entry units within a position)
@@ -416,3 +418,37 @@ class Database:
             )
             await self.conn.commit()
             logger.info("migration_applied", migration="add_watchlist_exchange_column")
+
+        # Migration: UNIQUE(ticker, status) → partial unique index (OPEN only)
+        # 기존 테이블에 UNIQUE(ticker, status) 제약이 있으면 재생성
+        cursor = await self.conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='positions'"
+        )
+        row = await cursor.fetchone()
+        if row and row[0] and "UNIQUE(ticker, status)" in row[0]:
+            await self.conn.executescript("""
+                CREATE TABLE IF NOT EXISTS positions_new (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ticker TEXT NOT NULL,
+                    system TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'OPEN',
+                    total_shares INTEGER NOT NULL DEFAULT 0,
+                    total_cost REAL NOT NULL DEFAULT 0,
+                    avg_entry_price REAL NOT NULL DEFAULT 0,
+                    current_stop_price REAL NOT NULL,
+                    n_at_entry REAL NOT NULL,
+                    sector TEXT,
+                    industry TEXT,
+                    opened_at TEXT NOT NULL,
+                    closed_at TEXT,
+                    close_reason TEXT,
+                    realized_pnl REAL
+                );
+                INSERT INTO positions_new SELECT * FROM positions;
+                DROP TABLE positions;
+                ALTER TABLE positions_new RENAME TO positions;
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_positions_ticker_open
+                    ON positions(ticker) WHERE status = 'OPEN';
+            """)
+            await self.conn.commit()
+            logger.info("migration_applied", migration="remove_unique_ticker_status")

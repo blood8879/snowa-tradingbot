@@ -177,7 +177,23 @@ class WatchlistManager:
             sector = None
             industry = None
             market_cap = None
-            exchange = universe.get_exchange(ticker) if universe else "NASD"
+            # Exchange 폴백: universe → DB 기존값 → "NASD"
+            exchange = None
+            if universe and universe.get_stock(ticker):
+                exchange = universe.get_exchange(ticker)
+            if exchange is None:
+                try:
+                    cursor = await self._db.conn.execute(
+                        "SELECT exchange FROM watchlist WHERE ticker = ?",
+                        (ticker,),
+                    )
+                    row = await cursor.fetchone()
+                    if row and row[0]:
+                        exchange = row[0]
+                except Exception:
+                    pass
+            if exchange is None:
+                exchange = "NASD"
 
             entry = {
                 "ticker": ticker,

@@ -59,6 +59,9 @@ class IntradayMonitor:
         market_filter_pass: SPY 200MA 필터 통과 여부.
     """
 
+    # 잔고 캐시 TTL (초) — KIS API 초당 1건 제한 회피
+    _BALANCE_CACHE_TTL: float = 30.0
+
     def __init__(
         self,
         db: Database,
@@ -83,12 +86,66 @@ class IntradayMonitor:
         self.market_filter_pass: bool = False
         self._running: bool = False
 
+        # 잔고 캐시: KIS REST API rate-limit (1 req/sec) 회피
+        self._cached_cash: float | None = None
+        self._balance_cache_time: float = 0.0
+
     # ────────────────────────────────────────────────────────
     # Lifecycle
     # ────────────────────────────────────────────────────────
 
+    async def _get_cached_cash(self) -> float | None:
+        """Return cached available cash, refreshing from KIS API only when TTL expires.
+
+        Uses get_purchasable_amount() (매수가능금액조회) as primary source,
+        which reliably returns ord_psbl_frcr_amt for both paper and live accounts.
+        Falls back to get_balance() summary if purchasable amount fails.
+        """
+        now = time.monotonic()
+        if self._cached_cash is not None and (now - self._balance_cache_time) < self._BALANCE_CACHE_TTL:
+            return self._cached_cash
+
+        cash: float | None = None
+
+        # Primary: get_purchasable_amount (works reliably for paper & live)
+        try:
+            psamount = await self._rest.get_purchasable_amount()
+            cash = float(psamount.get("ord_psbl_frcr_amt", 0))
+            if cash > 0:
+                self._cached_cash = cash
+                self._balance_cache_time = now
+                logger.info("balance_cache_refreshed", cash=cash, source="purchasable_amount")
+                return cash
+        except Exception:
+            logger.warning("purchasable_amount_fetch_failed", exc_info=True)
+
+        # Fallback: get_balance summary
+        try:
+            account_info = await self._rest.get_balance()
+            summary = account_info.get("summary", {}) if isinstance(account_info, dict) else {}
+            cash = float(summary.get("frcr_ord_psbl_amt1", 0))
+            if cash > 0:
+                self._cached_cash = cash
+                self._balance_cache_time = now
+                logger.info("balance_cache_refreshed", cash=cash, source="balance_summary")
+                return cash
+        except Exception:
+            logger.warning("balance_fetch_failed", exc_info=True)
+
+        # Last resort: use stale cache
+        if self._cached_cash is not None:
+            logger.info("balance_using_stale_cache", cash=self._cached_cash)
+            return self._cached_cash
+
+        logger.error("balance_all_sources_failed")
+        return None
+
+    def invalidate_balance_cache(self) -> None:
+        """Force next balance call to hit the API (e.g., after order submission)."""
+        self._cached_cash = None
+        self._balance_cache_time = 0.0
+
     async def start(self) -> None:
-        """모니터링 시작."""
         self._running = True
         logger.info(
             "intraday_monitor_started",
@@ -235,8 +292,8 @@ class IntradayMonitor:
             shares=position.total_shares,  # type: ignore[attr-defined]
             notes=journal_notes,
         )
+        self.invalidate_balance_cache()
 
-        # 이벤트 발행
         signal = TradeSignal(
             signal_type=SignalType.STOP_LOSS_HIT,
             ticker=ticker,
@@ -274,15 +331,13 @@ class IntradayMonitor:
             logger.info("pyramid_skipped_pending_order", ticker=ticker)
             return
 
-        # 계좌 잔고 조회
-        try:
-            account_info = await self._rest.get_balance()
-            summary = account_info.get("summary", {}) if isinstance(account_info, dict) else {}
-            cash = float(summary.get("frcr_ord_psbl_amt1", 0))
-        except Exception:
-            logger.exception("pyramid_balance_fetch_failed", ticker=ticker)
+        cash = await self._get_cached_cash()
+        if cash is None:
+            logger.error("pyramid_skipped_no_balance", ticker=ticker)
             return
-        account_equity = cash + position.total_cost  # type: ignore[attr-defined]
+        open_positions = await self._position_mgr.get_open_positions()
+        total_position_value = sum(p.total_cost for p in open_positions)
+        account_equity = cash + total_position_value
 
         # 리스크 체크
         sizing = calculate_unit_shares(
@@ -345,8 +400,7 @@ class IntradayMonitor:
             order_type=OrderType.PYRAMID,
             notes=journal_notes,
         )
-
-        # NOTE: 포지션 갱신은 _handle_fill_position() 에서 체결 확인 후 수행
+        self.invalidate_balance_cache()
 
         logger.info(
             "pyramid_order_submitted",
@@ -396,12 +450,9 @@ class IntradayMonitor:
             logger.info("entry_skipped_pending_order", ticker=ticker)
             return
 
-        try:
-            account_info = await self._rest.get_balance()
-            summary = account_info.get("summary", {}) if isinstance(account_info, dict) else {}
-            cash = float(summary.get("frcr_ord_psbl_amt1", 0))
-        except Exception:
-            logger.exception("entry_balance_fetch_failed", ticker=ticker)
+        cash = await self._get_cached_cash()
+        if cash is None:
+            logger.error("entry_skipped_no_balance", ticker=ticker)
             return
 
         open_positions = await self._position_mgr.get_open_positions()
@@ -481,8 +532,7 @@ class IntradayMonitor:
             order_type=OrderType.ENTRY,
             notes=journal_notes,
         )
-
-        # NOTE: 포지션 오픈은 _handle_fill_position() 에서 체결 확인 후 수행
+        self.invalidate_balance_cache()
 
         logger.info(
             "entry_order_submitted",
@@ -573,8 +623,7 @@ class IntradayMonitor:
             order_type=OrderType.EXIT,
             notes=journal_notes,
         )
-
-        # NOTE: 포지션 청산은 _handle_fill_position() 에서 체결 확인 후 수행
+        self.invalidate_balance_cache()
 
         # 이벤트 발행
         signal = TradeSignal(

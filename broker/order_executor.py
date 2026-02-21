@@ -431,13 +431,31 @@ class OrderExecutor:
             if order.order_type == OrderType.ENTRY and order.side == OrderSide.BUY:
                 position = await self._position_mgr.get_position(order.ticker)
                 if position is None:
+                    n_value = notes.get("atr", 0.0)
+                    stop_price = notes.get("stop_price", 0.0)
+
+                    # 안전장치: notes 파싱 실패로 stop_price=0이면 재계산
+                    if stop_price <= 0 and fill_price > 0:
+                        from strategy.stop_loss import calculate_stop_price as calc_stop
+                        if n_value > 0:
+                            stop_price = calc_stop(fill_price, n_value)
+                        else:
+                            # n_value도 없으면 10% 고정 스톱
+                            stop_price = fill_price * 0.90
+                        logger.warning(
+                            "fill_stop_price_recalculated",
+                            ticker=order.ticker,
+                            stop_price=stop_price,
+                            n_value=n_value,
+                        )
+
                     await self._position_mgr.open_position(
                         ticker=order.ticker,
                         system=notes.get("system", "S1"),
                         entry_price=fill_price,
                         shares=fill_shares,
-                        n_value=notes.get("atr", 0.0),
-                        stop_price=notes.get("stop_price", 0.0),
+                        n_value=n_value,
+                        stop_price=stop_price,
                     )
                     logger.info(
                         "fill_position_opened",

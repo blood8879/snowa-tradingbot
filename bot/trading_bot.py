@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import structlog
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -81,7 +82,9 @@ class TradingBot:
 
         # ── Order Executor (after position_mgr for fill-confirmed management) ──
         self._order_executor = OrderExecutor(
-            self._rest_client, self._db, self._position_mgr,
+            self._rest_client,
+            self._db,
+            self._position_mgr,
         )
 
         # ── Bot Layer ──
@@ -169,6 +172,9 @@ class TradingBot:
             scheduler_jobs=len(self._scheduler.get_jobs()),
         )
 
+        # Step 4.5: 장중 재시작 감지 → pre_market + intraday 즉시 실행
+        await self._catchup_if_market_open()
+
         # Step 5: 킬스위치 감시 + heartbeat 루프
         try:
             while self._running:
@@ -212,40 +218,49 @@ class TradingBot:
             ),
             id="daily_screening",
             name="Daily CANSLIM Screening",
-            misfire_grace_time=600,
+            misfire_grace_time=7200,
         )
 
         # 장전 준비: KST 22:00 (= UTC 13:00)
         self._scheduler.add_job(
             self._run_pre_market,
             trigger=CronTrigger(
-                hour=22, minute=0, day_of_week="mon-fri", timezone="Asia/Seoul",
+                hour=22,
+                minute=0,
+                day_of_week="mon-fri",
+                timezone="Asia/Seoul",
             ),
             id="pre_market",
             name="Pre-Market Preparation",
-            misfire_grace_time=300,
+            misfire_grace_time=7200,
         )
 
         # 장중 모니터링 시작: KST 23:30 (= UTC 14:30)
         self._scheduler.add_job(
             self._start_intraday,
             trigger=CronTrigger(
-                hour=23, minute=30, day_of_week="mon-fri", timezone="Asia/Seoul",
+                hour=23,
+                minute=30,
+                day_of_week="mon-fri",
+                timezone="Asia/Seoul",
             ),
             id="market_open",
             name="Market Open - Start Intraday",
-            misfire_grace_time=300,
+            misfire_grace_time=7200,
         )
 
         # 장후 정리: KST 06:30 (= UTC 21:30, 다음 날)
         self._scheduler.add_job(
             self._run_post_market,
             trigger=CronTrigger(
-                hour=6, minute=30, day_of_week="tue-sat", timezone="Asia/Seoul",
+                hour=6,
+                minute=30,
+                day_of_week="tue-sat",
+                timezone="Asia/Seoul",
             ),
             id="post_market",
             name="Post-Market Cleanup",
-            misfire_grace_time=300,
+            misfire_grace_time=7200,
         )
 
         logger.info(
@@ -284,10 +299,43 @@ class TradingBot:
                     error=str(exc),
                 )
                 if attempt >= max_retries:
-                    raise RuntimeError(
-                        f"KIS auth failed after {max_retries} attempts"
-                    ) from exc
+                    raise RuntimeError(f"KIS auth failed after {max_retries} attempts") from exc
                 await asyncio.sleep(delay)
+
+    # ────────────────────────────────────────────────────────
+    # Market-Hours Catch-Up
+    # ────────────────────────────────────────────────────────
+
+    async def _catchup_if_market_open(self) -> None:
+        """Detect mid-session restart during US market hours and auto-recover.
+
+        US regular hours: 09:30–16:00 ET (KST 23:30–06:00 next day).
+        If the bot starts inside this window, run pre_market + start_intraday
+        immediately so we don't sit idle until next scheduled trigger.
+        """
+        now_et = datetime.now(ZoneInfo("America/New_York"))
+        market_open = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
+        market_close = now_et.replace(hour=16, minute=0, second=0, microsecond=0)
+
+        weekday = now_et.weekday()  # 0=Mon ... 4=Fri
+        if weekday > 4:
+            logger.info("catchup_skip_weekend", weekday=weekday)
+            return
+
+        if not (market_open <= now_et <= market_close):
+            logger.info(
+                "catchup_skip_outside_hours",
+                now_et=now_et.isoformat(),
+            )
+            return
+
+        logger.warning(
+            "catchup_mid_session_restart_detected",
+            now_et=now_et.isoformat(),
+        )
+
+        await self._run_pre_market()
+        await self._start_intraday()
 
     # ────────────────────────────────────────────────────────
     # Scheduled Tasks
@@ -296,19 +344,23 @@ class TradingBot:
     async def _record_starting_equity(self) -> None:
         """봇 최초 실행 시 실제 계좌 잔고를 DB에 기록한다.
 
-        이미 기록된 값이 있으면 건너뛴다.
+        이미 기록된 유효한 값(> 0)이 있으면 건너뛴다.
+        0으로 잘못 기록된 경우 다시 조회한다.
         누적 P&L 계산의 기준점으로 사용된다.
         """
         existing = await self._db.get_state("starting_equity")
-        if existing is not None:
+        if existing is not None and float(existing) > 0:
             logger.info("starting_equity_already_recorded", value=existing)
             return
 
         try:
             account_info = await self._account_mgr.get_account_info()
             equity = account_info.total_equity
-            await self._db.set_state("starting_equity", str(equity))
-            logger.info("starting_equity_recorded", equity=equity)
+            if equity > 0:
+                await self._db.set_state("starting_equity", str(equity))
+                logger.info("starting_equity_recorded", equity=equity)
+            else:
+                logger.warning("starting_equity_zero_skipped", equity=equity)
         except Exception:
             logger.exception("starting_equity_record_failed")
 
@@ -318,6 +370,7 @@ class TradingBot:
         1. 유니버스 가격 갱신 (최근 5거래일)
         2. Earnings Calendar 기반 재무 데이터 갱신
         3. CANSLIM + Minervini 스크리닝 → 워치리스트 업데이트
+        4. 완료 후 놓친 스케줄 작업 복구
         """
         logger.info("daily_screening_start")
 
@@ -331,6 +384,43 @@ class TradingBot:
             )
         except Exception as e:
             logger.error("daily_screening_failed", error=str(e), exc_info=True)
+
+        await self._check_and_recover_missed_jobs()
+
+    async def _check_and_recover_missed_jobs(self) -> None:
+        """스크리닝 완료 후, 놓친 장전/장중 스케줄을 즉시 실행.
+
+        daily_screening이 45분+ 걸리면 pre_market(22:00)이나
+        market_open(23:30)이 misfire될 수 있다. 현재 KST 시각을 확인하여
+        해당 작업이 오늘 아직 실행되지 않았으면 즉시 실행한다.
+        """
+        now_kst = datetime.now(ZoneInfo("Asia/Seoul"))
+        today_str = now_kst.strftime("%Y-%m-%d")
+        weekday = now_kst.weekday()
+
+        if weekday > 4:
+            return
+
+        last_pre_market_date = await self._db.get_state("last_pre_market_date")
+        last_market_open_date = await self._db.get_state("last_market_open_date")
+
+        if now_kst.hour >= 22 and last_pre_market_date != today_str:
+            logger.warning(
+                "recover_missed_pre_market",
+                now_kst=now_kst.isoformat(),
+                last_run=last_pre_market_date,
+            )
+            await self._run_pre_market()
+
+        if (
+            now_kst.hour > 23 or (now_kst.hour == 23 and now_kst.minute >= 30)
+        ) and last_market_open_date != today_str:
+            logger.warning(
+                "recover_missed_market_open",
+                now_kst=now_kst.isoformat(),
+                last_run=last_market_open_date,
+            )
+            await self._start_intraday()
 
     async def _run_pre_market(self) -> None:
         """장전 준비 — KST 22:00 실행.
@@ -349,9 +439,7 @@ class TradingBot:
                 result = await self._pre_market.run()
 
                 signals = result.get("signals", [])
-                self._intraday.precomputed_signals = {
-                    s.ticker: s for s in signals
-                }
+                self._intraday.precomputed_signals = {s.ticker: s for s in signals}
                 self._intraday.market_filter_pass = result.get("market_filter_pass", False)
 
                 logger.info(
@@ -361,6 +449,9 @@ class TradingBot:
                     positions=result.get("position_count", 0),
                     signals=len(signals),
                 )
+
+                today_str = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d")
+                await self._db.set_state("last_pre_market_date", today_str)
                 return
 
             except Exception as e:
@@ -416,6 +507,9 @@ class TradingBot:
                 name="fill_check_loop",
             )
             await self._db.set_state("ws_status", "CONNECTED")
+
+            today_str = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d")
+            await self._db.set_state("last_market_open_date", today_str)
 
             logger.info("intraday_started", tickers_count=len(tickers))
 
