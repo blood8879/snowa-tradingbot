@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 
@@ -14,6 +15,25 @@ logger = structlog.get_logger(__name__)
 
 router = APIRouter(tags=["logs"])
 
+# ---------------------------------------------------------------------------
+# Tail-read: only read the last chunk of the log file instead of the whole
+# thing.  The log file can be 200 MB+, so reading it entirely blocks the
+# event loop and makes the whole dashboard unresponsive.
+# ---------------------------------------------------------------------------
+
+_TAIL_BYTES = 512 * 1024  # read last 512 KB – more than enough for 500 lines
+
+
+def _tail_lines(path: Path, max_bytes: int = _TAIL_BYTES) -> list[str]:
+    """Return the last *max_bytes* worth of lines from *path*."""
+    size = path.stat().st_size
+    offset = max(0, size - max_bytes)
+    with open(path, "r", encoding="utf-8", errors="replace") as fh:
+        if offset:
+            fh.seek(offset)
+            fh.readline()  # discard partial first line
+        return fh.readlines()
+
 
 @router.get("/logs", dependencies=[Depends(verify_api_key)])
 async def get_logs(
@@ -26,8 +46,10 @@ async def get_logs(
 
     entries: list[dict] = []
 
-    if log_path.exists():
-        lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    if log_path.exists() and log_path.stat().st_size > 0:
+        # Run blocking file I/O in a thread so we don't stall the event loop
+        lines = await asyncio.to_thread(_tail_lines, log_path)
+
         raw_entries: list[dict] = []
         for line in lines:
             line = line.strip()
@@ -35,19 +57,15 @@ async def get_logs(
                 continue
             try:
                 entry = json.loads(line)
-                raw_entries.append(entry)
             except json.JSONDecodeError:
-                raw_entries.append({
+                entry = {
                     "event": line[:200],
                     "level": "info",
                     "timestamp": "",
-                })
-
-        if level != "ALL":
-            raw_entries = [
-                e for e in raw_entries
-                if e.get("level", "").lower() == level.lower()
-            ]
+                }
+            if level != "ALL" and entry.get("level", "").lower() != level.lower():
+                continue
+            raw_entries.append(entry)
 
         entries = raw_entries[-limit:]
         entries.reverse()

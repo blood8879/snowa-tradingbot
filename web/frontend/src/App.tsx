@@ -33,7 +33,7 @@ const router = createBrowserRouter([
 
 export default function App() {
   return (
-    <SWRConfig value={{ fetcher, revalidateOnFocus: false }}>
+    <SWRConfig value={{ fetcher, revalidateOnFocus: false, errorRetryCount: 3, dedupingInterval: 5000 }}>
       <RouterProvider router={router} />
     </SWRConfig>
   );
