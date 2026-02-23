@@ -157,9 +157,11 @@ class KISWebSocket:
             self._ws = ws
             self._status = WebSocketStatus.CONNECTED
             self._last_message_time = time.time()
-            self._reconnect_count = 0
+            # NOTE: _reconnect_count는 여기서 리셋하지 않음.
+            # 실제 틱 데이터 수신 시(_parse_tick_data)에서만 리셋.
+            # KIS "ALREADY IN USE appkey" 즉시 킥 시 백오프가 작동하도록.
 
-            logger.info("ws_connected", url=ws_url)
+            logger.info("ws_connected", url=ws_url, reconnect_count=self._reconnect_count)
 
             # 종목 구독
             for ticker in self._subscribed_tickers:
@@ -298,6 +300,11 @@ class KISWebSocket:
             if not ticker and rsym:
                 # RSYM 형식: "D" + exchange(3) + ticker → 4번째 문자부터 추출
                 ticker = rsym[4:] if len(rsym) > 4 else rsym
+
+            # 실제 틱 수신 확인 → 재연결 카운터 리셋 (백오프 초기화)
+            if self._reconnect_count > 0:
+                logger.info("ws_reconnect_count_reset", was=self._reconnect_count)
+                self._reconnect_count = 0
 
             if not self._first_tick_logged:
                 self._first_tick_logged = True

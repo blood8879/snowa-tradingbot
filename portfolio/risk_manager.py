@@ -124,14 +124,12 @@ class RiskManager:
         if not allowed:
             logger.warning(
                 "entry_blocked",
-                ticker=ticker,
                 violations=violations,
                 **details,
             )
         else:
             logger.debug(
                 "entry_allowed",
-                ticker=ticker,
                 **details,
             )
 

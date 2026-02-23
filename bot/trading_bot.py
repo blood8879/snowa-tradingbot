@@ -532,7 +532,7 @@ class TradingBot:
         return result
 
     async def _fill_check_loop(self) -> None:
-        FILL_CHECK_INTERVAL = 10
+        FILL_CHECK_INTERVAL = 30
         try:
             while True:
                 await asyncio.sleep(FILL_CHECK_INTERVAL)

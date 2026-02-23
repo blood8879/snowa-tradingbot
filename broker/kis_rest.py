@@ -634,7 +634,9 @@ class KISRestClient:
         seen_odno: set[str] = set()
         tr_id = await self._get_overseas_tr_id(TR_FILLED_DAY, TR_FILLED_NIGHT)
 
-        for exchange in ("NASD", "NYSE", "AMEX"):
+        for i, exchange in enumerate(("NASD", "NYSE", "AMEX")):
+            if i > 0:
+                await asyncio.sleep(1)  # KIS 초당 거래건수 제한 방지
             try:
                 params = {
                     "CANO": self._settings.account_number,
@@ -646,6 +648,9 @@ class KISRestClient:
                     "CCLD_NCCS_DVSN": "01",
                     "OVRS_EXCG_CD": exchange,
                     "SORT_SQN": "DS",
+                    "ORD_DT": "",
+                    "ORD_GNO_BRNO": "",
+                    "ODNO": "",
                     "CTX_AREA_FK200": "",
                     "CTX_AREA_NK200": "",
                 }
