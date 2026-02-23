@@ -69,6 +69,36 @@ function getRowHighlight(alert_level: NearEntryAlert['alert_level']): string {
   }
 }
 
+/** Recompute alert_level & signal_type using a real-time price. */
+function recomputeAlert(
+  row: NearEntryAlert,
+  realtimePrice: number | undefined,
+): { alertLevel: NearEntryAlert['alert_level']; signalType: string; proximity20: number; proximity55: number | null } {
+  const price = realtimePrice ?? row.latest_price;
+  const d20 = row.donchian_upper_20;
+  const d55 = row.donchian_upper_55;
+
+  const proximity20 = d20 > 0 ? ((d20 - price) / d20) * 100 : row.proximity_pct_20;
+  const proximity55 = d55 != null && d55 > 0 ? ((d55 - price) / d55) * 100 : null;
+
+  const broken20 = price >= d20;
+  const broken55 = d55 != null && price >= d55;
+
+  let signalType = 'none';
+  if (broken20 && broken55) signalType = 'S1+S2';
+  else if (broken55) signalType = 'S2';
+  else if (broken20) signalType = 'S1';
+  else if (proximity20 <= 5.0) signalType = 'S1';
+  else if (proximity55 != null && proximity55 <= 5.0) signalType = 'S2';
+
+  let alertLevel: NearEntryAlert['alert_level'] = 'normal';
+  if (broken20 || broken55) alertLevel = 'breakout';
+  else if (proximity20 <= 2.0) alertLevel = 'imminent';
+  else if (proximity20 <= 5.0) alertLevel = 'close';
+
+  return { alertLevel, signalType, proximity20, proximity55 };
+}
+
 function getColumns(): AlertColumn[] {
   return [
     {
@@ -94,18 +124,20 @@ function getColumns(): AlertColumn[] {
     {
       key: 'signal_type',
       header: '신호',
-      render: (row) => {
+      render: (row, realtimeData) => {
+        const rt = realtimeData?.prices[row.ticker];
+        const { signalType } = recomputeAlert(row, rt?.price);
         const color =
-          row.signal_type === 'S1+S2'
+          signalType === 'S1+S2'
             ? 'text-emerald-400'
-            : row.signal_type === 'S2'
+            : signalType === 'S2'
               ? 'text-cyan-400'
-              : row.signal_type === 'S1'
+              : signalType === 'S1'
                 ? 'text-amber-400'
                 : 'text-slate-500';
         return (
           <span className={`font-semibold text-xs ${color}`}>
-            {row.signal_type === 'none' ? '-' : row.signal_type}
+            {signalType === 'none' ? '-' : signalType}
           </span>
         );
       },
@@ -133,13 +165,10 @@ function getColumns(): AlertColumn[] {
       header: '근접도',
       render: (row, realtimeData) => {
         const rt = realtimeData?.prices[row.ticker];
-        const price = rt?.price ?? row.latest_price;
-        const proximity = row.donchian_upper_20 > 0
-          ? ((row.donchian_upper_20 - price) / row.donchian_upper_20) * 100
-          : row.proximity_pct_20;
+        const { alertLevel, proximity20 } = recomputeAlert(row, rt?.price);
         return (
-          <span className={`tabular-nums font-medium ${getProximityColor(row.alert_level)}`}>
-            {proximity.toFixed(2)}%
+          <span className={`tabular-nums font-medium ${getProximityColor(alertLevel)}`}>
+            {proximity20.toFixed(2)}%
           </span>
         );
       },
@@ -147,11 +176,15 @@ function getColumns(): AlertColumn[] {
     {
       key: 'alert_level',
       header: '알림',
-      render: (row) => (
-        <Badge variant={getAlertBadgeVariant(row.alert_level)}>
-          {getAlertBadgeLabel(row.alert_level)}
-        </Badge>
-      ),
+      render: (row, realtimeData) => {
+        const rt = realtimeData?.prices[row.ticker];
+        const { alertLevel } = recomputeAlert(row, rt?.price);
+        return (
+          <Badge variant={getAlertBadgeVariant(alertLevel)}>
+            {getAlertBadgeLabel(alertLevel)}
+          </Badge>
+        );
+      },
     },
     {
       key: 'rs_rating',
@@ -202,6 +235,19 @@ export function AlertsPage() {
   const tickers = useMemo(() => alerts.map((a) => a.ticker), [alerts]);
   const { data: realtimeData } = useRealtimePrices(tickers);
 
+  // Recompute counts using real-time prices
+  const { imminentCount, breakoutCount } = useMemo(() => {
+    let imm = 0;
+    let brk = 0;
+    for (const a of alerts) {
+      const rt = realtimeData?.prices[a.ticker];
+      const { alertLevel } = recomputeAlert(a, rt?.price);
+      if (alertLevel === 'imminent') imm++;
+      if (alertLevel === 'breakout') brk++;
+    }
+    return { imminentCount: imm, breakoutCount: brk };
+  }, [alerts, realtimeData]);
+
   if (isLoading) {
     return <LoadingSpinner />;
   }
@@ -225,19 +271,19 @@ export function AlertsPage() {
         />
         <StatCard
           label="돌파 임박"
-          value={data?.imminent_count ?? 0}
+          value={imminentCount}
           delta={
-            data && data.imminent_count > 0
-              ? `${data.imminent_count}개 종목`
+            imminentCount > 0
+              ? `${imminentCount}개 종목`
               : undefined
           }
           deltaType={
-            data && data.imminent_count > 0 ? 'positive' : 'neutral'
+            imminentCount > 0 ? 'positive' : 'neutral'
           }
         />
         <StatCard
           label="돌파 발생"
-          value={data?.breakout_count ?? 0}
+          value={breakoutCount}
         />
       </div>
 
@@ -264,10 +310,13 @@ export function AlertsPage() {
                   </td>
                 </tr>
               ) : (
-                alerts.map((row) => (
+                alerts.map((row) => {
+                  const rt = realtimeData?.prices[row.ticker];
+                  const { alertLevel: rowAlertLevel } = recomputeAlert(row, rt?.price);
+                  return (
                   <tr
                     key={row.ticker}
-                    className={`border-b border-slate-700/30 hover:bg-slate-800/30 transition-colors ${getRowHighlight(row.alert_level)}`}
+                    className={`border-b border-slate-700/30 hover:bg-slate-800/30 transition-colors ${getRowHighlight(rowAlertLevel)}`}
                   >
                     {columns.map((col) => (
                       <td key={col.key} className="px-4 py-3 text-sm">
@@ -275,7 +324,8 @@ export function AlertsPage() {
                       </td>
                     ))}
                   </tr>
-                ))
+                  );
+                })
               )}
             </tbody>
           </table>

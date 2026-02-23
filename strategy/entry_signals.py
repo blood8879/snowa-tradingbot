@@ -14,6 +14,7 @@ from config.constants import (
     SYSTEM1_FILTER_ENABLED,
     SYSTEM2_FILTER_ENABLED,
     BUY_BUFFER_PCT,
+    MAX_CHASE_PCT,
 )
 from core.models import TradingSystem
 
@@ -43,6 +44,19 @@ def check_s1_entry(
 
     filtered_out = False
     reason = ""
+
+    # Chase guard: skip if price ran too far above breakout level
+    if breakout and donchian_upper_20 > 0:
+        chase_pct = (current_price - donchian_upper_20) / donchian_upper_20
+        if chase_pct > MAX_CHASE_PCT:
+            return {
+                "signal": False,
+                "system": TradingSystem.S1.value,
+                "breakout_level": donchian_upper_20,
+                "entry_price": current_price,
+                "filtered_out": True,
+                "reason": f"S1 chase guard: price {chase_pct:.1%} above breakout (max {MAX_CHASE_PCT:.0%})",
+            }
 
     if breakout and SYSTEM1_FILTER_ENABLED:
         if last_breakout_was_winner is True:
@@ -86,6 +100,18 @@ def check_s2_entry(
     Returns a dict describing the signal.
     """
     breakout = current_price >= donchian_upper_55
+
+    # Chase guard: skip if price ran too far above breakout level
+    if breakout and donchian_upper_55 > 0:
+        chase_pct = (current_price - donchian_upper_55) / donchian_upper_55
+        if chase_pct > MAX_CHASE_PCT:
+            return {
+                "signal": False,
+                "system": TradingSystem.S2.value,
+                "breakout_level": donchian_upper_55,
+                "entry_price": current_price,
+                "reason": f"S2 chase guard: price {chase_pct:.1%} above breakout (max {MAX_CHASE_PCT:.0%})",
+            }
 
     return {
         "signal": breakout,

@@ -155,6 +155,7 @@ GAP_DOWN_HANDLING: str = "MARKET_OPEN"       # Gap down: sell at market open pri
 # ============================================================
 STOP_SELL_BUFFER_PCT: float = 0.005          # 0.5% below current price for stop sell
 BUY_BUFFER_PCT: float = 0.003               # 0.3% above current price for breakout buy
+MAX_CHASE_PCT: float = 0.05                 # 5% — skip entry if price is >5% above breakout level (CANSLIM rule)
 STOP_RETRY_DELAY_SECONDS: int = 5            # Retry unfilled stop after 5 seconds
 STOP_MAX_RETRIES: int = 3                    # Max 3 retries for stop orders
 
