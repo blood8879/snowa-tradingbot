@@ -7,13 +7,14 @@ GET /api/journal — returns trade statistics for a given month.
 from __future__ import annotations
 
 import calendar
-from datetime import datetime
+from datetime import datetime, timezone
 
 import structlog
 from fastapi import APIRouter, Depends, Query
 
+from broker.account import AccountManager
 from core.database import Database
-from web.api.dependencies import get_db, verify_api_key
+from web.api.dependencies import get_db, get_account_manager, verify_api_key
 
 logger = structlog.get_logger(__name__)
 
@@ -27,6 +28,7 @@ async def get_journal(
         description="Month in YYYY-MM format (defaults to current month)",
     ),
     db: Database = Depends(get_db),
+    account_mgr: AccountManager | None = Depends(get_account_manager),
 ) -> dict:
     """Return trade statistics for a specified month.
 
@@ -142,6 +144,41 @@ async def get_journal(
     monthly_pnl = pnl_row[0] if pnl_row and pnl_row[0] else 0.0
     min_equity = pnl_row[1] if pnl_row and pnl_row[1] else 0.0
     max_equity = pnl_row[2] if pnl_row and pnl_row[2] else 0.0
+
+    # ── 현재월이면 실시간 브로커 equity로 보정 ──
+    current_month = datetime.now(timezone.utc).strftime("%Y-%m")
+    if month == current_month and account_mgr is not None:
+        try:
+            info = await account_mgr.get_account_info()
+            live_equity = info.total_equity
+            if live_equity > 0:
+                # 이전 월 마지막 equity 조회 (월초 기준점)
+                prev_cursor = await db.conn.execute(
+                    """
+                    SELECT account_equity FROM daily_log
+                    WHERE date < ?
+                    ORDER BY date DESC LIMIT 1
+                    """,
+                    (month_start,),
+                )
+                prev_row = await prev_cursor.fetchone()
+                prev_month_equity = prev_row[0] if prev_row and prev_row[0] else 0.0
+
+                # 이전 월 equity가 없으면 starting_equity 사용
+                if prev_month_equity <= 0:
+                    starting = await db.get_state("starting_equity")
+                    prev_month_equity = float(starting) if starting else 0.0
+
+                if prev_month_equity > 0:
+                    monthly_pnl = live_equity - prev_month_equity
+
+                max_equity = max(max_equity, live_equity)
+                if min_equity <= 0:
+                    min_equity = live_equity
+                else:
+                    min_equity = min(min_equity, live_equity)
+        except Exception as exc:
+            logger.warning("journal_live_equity_failed", error=str(exc))
 
     return {
         "month": month,
