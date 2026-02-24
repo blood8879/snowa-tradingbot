@@ -672,52 +672,74 @@ class KISRestClient:
 
     async def get_balance(self) -> dict[str, Any]:
         """
-        해외주식 잔고 조회.
+        해외주식 잔고 조회 (NASD/NYSE/AMEX 전체).
 
         Returns:
             {
-                "output1": {...},                      # 계좌 요약
-                "output2": [{...}, {...}, ...],        # 보유 종목 리스트
+                "summary": {...},                      # 마지막 거래소의 계좌 요약
+                "positions": [{...}, {...}, ...],      # 전 거래소 보유 종목 리스트
             }
         """
-        params = {
-            "CANO": self._settings.account_number,
-            "ACNT_PRDT_CD": self._settings.account_product_code,
-            "OVRS_EXCG_CD": "NASD",
-            "TR_CRCY_CD": "USD",
-            "CTX_AREA_FK200": "",
-            "CTX_AREA_NK200": "",
-        }
         tr_id = await self._get_overseas_tr_id(TR_BALANCE_DAY, TR_BALANCE_NIGHT)
-        data = await self._request(
-            "GET",
-            "/uapi/overseas-stock/v1/trading/inquire-balance",
-            tr_id,
-            params=params,
-        )
-        # 한투 API 응답 형식 정규화:
-        # - output1(요약): 보유 종목 있으면 dict, 없으면 빈 list
-        # - output2(보유종목): 보유 있으면 list[dict], 없으면 단일 dict(합계행)
-        raw_summary = data.get("output1", {})
-        raw_positions = data.get("output2", [])
+        all_positions: list[dict[str, Any]] = []
+        summary: dict[str, Any] = {}
 
-        # summary 정규화: list면 비어있다는 뜻 → 빈 dict
-        if isinstance(raw_summary, list):
-            summary = raw_summary[0] if raw_summary else {}
-        else:
-            summary = raw_summary
+        for i, exchange in enumerate(("NASD", "NYSE", "AMEX")):
+            if i > 0:
+                await asyncio.sleep(1)  # KIS 초당 거래건수 제한 방지
+            try:
+                params = {
+                    "CANO": self._settings.account_number,
+                    "ACNT_PRDT_CD": self._settings.account_product_code,
+                    "OVRS_EXCG_CD": exchange,
+                    "TR_CRCY_CD": "USD",
+                    "CTX_AREA_FK200": "",
+                    "CTX_AREA_NK200": "",
+                }
+                data = await self._request(
+                    "GET",
+                    "/uapi/overseas-stock/v1/trading/inquire-balance",
+                    tr_id,
+                    params=params,
+                )
+                # KIS API 응답 형식:
+                # - output1: 보유 종목 리스트 (list[dict]) 또는 빈 경우 빈 list/dict
+                # - output2: 계좌 요약 (dict 또는 list)
+                raw_positions = data.get("output1", [])
+                raw_summary = data.get("output2", {})
 
-        # positions 정규화: dict면 보유 종목 없이 합계 행만 온 것 → 빈 list
-        if isinstance(raw_positions, dict):
-            positions: list[dict[str, Any]] = []
-        elif isinstance(raw_positions, list):
-            positions = raw_positions
-        else:
-            positions = []
+                # summary 정규화
+                if isinstance(raw_summary, list):
+                    exch_summary = raw_summary[0] if raw_summary else {}
+                else:
+                    exch_summary = raw_summary
+                if exch_summary:
+                    summary = exch_summary
+
+                # positions 정규화: list면 보유종목, dict면 단일항목 또는 빈값
+                if isinstance(raw_positions, list):
+                    all_positions.extend(raw_positions)
+                elif isinstance(raw_positions, dict) and raw_positions.get("ovrs_pdno"):
+                    all_positions.append(raw_positions)
+            except Exception as exc:
+                logger.warning(
+                    "get_balance_exchange_failed",
+                    exchange=exchange,
+                    error=str(exc),
+                )
+
+        # 중복 제거: 모의투자에서 여러 거래소 쿼리 시 같은 종목이 반복될 수 있음
+        seen_tickers: set[str] = set()
+        unique_positions: list[dict[str, Any]] = []
+        for pos in all_positions:
+            ticker = pos.get("ovrs_pdno", "")
+            if ticker and ticker not in seen_tickers:
+                seen_tickers.add(ticker)
+                unique_positions.append(pos)
 
         return {
             "summary": summary,
-            "positions": positions,
+            "positions": unique_positions,
         }
 
     async def get_purchasable_amount(
