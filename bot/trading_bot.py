@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -126,6 +127,7 @@ class TradingBot:
         # ── Scheduler ──
         self._scheduler = AsyncIOScheduler(timezone="Asia/Seoul")
         self._running: bool = False
+        self._intraday_started: bool = False  # 레이스 컨디션 방지 가드
         self._ws_task: asyncio.Task | None = None
         self._fill_check_task: asyncio.Task | None = None
 
@@ -484,9 +486,23 @@ class TradingBot:
         1. 인트라데이 모니터 시작
         2. WebSocket 연결 및 종목 구독
         """
+        # 레이스 컨디션 방지: 스케줄러와 catchup이 동시 호출 시 이중 실행 차단
+        if self._intraday_started:
+            logger.warning("intraday_already_started_skipping")
+            return
+        self._intraday_started = True
+
         logger.info("intraday_start")
 
         try:
+            # 재시작 등으로 precomputed_signals가 비어있으면 pre_market을 먼저 실행
+            if not self._intraday.precomputed_signals:
+                logger.warning(
+                    "intraday_signals_empty_running_pre_market",
+                    msg="precomputed_signals 비어있음 → pre_market 실행",
+                )
+                await self._run_pre_market()
+
             await self._intraday.start()
 
             tickers = list(self._intraday.precomputed_signals.keys())
@@ -540,15 +556,33 @@ class TradingBot:
 
     async def _fill_check_loop(self) -> None:
         FILL_CHECK_INTERVAL = 30
+        HEARTBEAT_INTERVAL = 300  # 5분마다 heartbeat 로그
+        last_heartbeat = 0.0
+        check_count = 0
         try:
             while True:
                 await asyncio.sleep(FILL_CHECK_INTERVAL)
+                check_count += 1
                 try:
                     filled = await self._order_executor.check_order_fills()
                     if filled:
                         logger.info("fill_check_matched", count=len(filled))
                 except Exception:
                     logger.exception("fill_check_error")
+
+                # 주기적 heartbeat 로그
+                now = time.time()
+                if now - last_heartbeat >= HEARTBEAT_INTERVAL:
+                    last_heartbeat = now
+                    pending = await self._db.conn.execute(
+                        "SELECT COUNT(*) FROM orders WHERE status IN ('SUBMITTED','PARTIAL')"
+                    )
+                    pending_count = (await pending.fetchone())[0]
+                    logger.info(
+                        "fill_check_heartbeat",
+                        checks_done=check_count,
+                        pending_orders=pending_count,
+                    )
         except asyncio.CancelledError:
             pass
 
@@ -574,9 +608,11 @@ class TradingBot:
             self._fill_check_task = None
 
             await self._intraday.stop()
+            self._intraday_started = False  # 다음 세션을 위해 가드 리셋
             logger.info("intraday_stopped")
 
         except Exception as e:
+            self._intraday_started = False
             logger.error("intraday_stop_failed", error=str(e), exc_info=True)
 
     async def _run_post_market(self) -> None:

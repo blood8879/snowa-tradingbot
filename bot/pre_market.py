@@ -17,7 +17,7 @@ import structlog
 from broker.account import AccountManager
 from broker.kis_auth import KISAuth
 from broker.kis_rest import KISRestClient
-from config.constants import LOOKBACK_DATA_DAYS
+from config.constants import LOOKBACK_DATA_DAYS, MARKET_BENCHMARK
 from core.database import Database
 from core.models import DonchianLevels, PrecomputedSignals
 from data.price_cache import PriceCache
@@ -152,8 +152,8 @@ class PreMarketPreparer:
         open_positions = await self._position_mgr.get_open_positions()
         position_tickers = [pos.ticker for pos in open_positions]
 
-        # 합집합으로 갱신 대상 결정
-        all_tickers = list(set(watchlist_tickers + position_tickers))
+        # 합집합으로 갱신 대상 결정 (+ SPY for market filter)
+        all_tickers = list(set(watchlist_tickers + position_tickers + [MARKET_BENCHMARK]))
 
         if not all_tickers:
             logger.info("pre_market_no_tickers_to_update")

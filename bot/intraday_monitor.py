@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from datetime import datetime, timezone
 import structlog
@@ -19,6 +20,7 @@ from broker.order_executor import OrderExecutor
 from core.database import Database
 from core.events import EventBus
 from core.models import (
+    OrderStatus,
     OrderType,
     PrecomputedSignals,
     SignalType,
@@ -61,6 +63,8 @@ class IntradayMonitor:
 
     # 잔고 캐시 TTL (초) — KIS API 초당 1건 제한 회피
     _BALANCE_CACHE_TTL: float = 30.0
+    # 주기적 상태 로그 간격 (초)
+    _STATUS_LOG_INTERVAL: float = 300.0
 
     def __init__(
         self,
@@ -90,6 +94,16 @@ class IntradayMonitor:
         self._cached_cash: float | None = None
         self._balance_cache_time: float = 0.0
 
+        # 주기적 상태 로그용 카운터
+        self._tick_count: int = 0
+        self._last_status_log_time: float = 0.0
+        self._last_prices: dict[str, float] = {}
+
+        # 피라미딩/진입 실패 시 쿨다운 (ticker → monotonic time)
+        self._pyramid_cooldown: dict[str, float] = {}
+        self._entry_cooldown: dict[str, float] = {}
+        self._SIGNAL_COOLDOWN: float = 60.0  # 실패 후 60초 대기
+
     # ────────────────────────────────────────────────────────
     # Lifecycle
     # ────────────────────────────────────────────────────────
@@ -100,9 +114,12 @@ class IntradayMonitor:
         Uses get_purchasable_amount() (매수가능금액조회) as primary source,
         which reliably returns ord_psbl_frcr_amt for both paper and live accounts.
         Falls back to get_balance() summary if purchasable amount fails.
+
+        실패 시에도 캐시 시간을 업데이트하여 rate limit 폭풍 방지 (negative cache).
         """
         now = time.monotonic()
-        if self._cached_cash is not None and (now - self._balance_cache_time) < self._BALANCE_CACHE_TTL:
+        if (now - self._balance_cache_time) < self._BALANCE_CACHE_TTL:
+            # TTL 내: 캐시값 반환 (None 포함 — negative cache)
             return self._cached_cash
 
         cash: float | None = None
@@ -110,7 +127,10 @@ class IntradayMonitor:
         # Primary: get_purchasable_amount (works reliably for paper & live)
         try:
             psamount = await self._rest.get_purchasable_amount()
+            # Paper 모드: ord_psbl_frcr_amt=0 이지만 frcr_ord_psbl_amt1에 실제값
             cash = float(psamount.get("ord_psbl_frcr_amt", 0))
+            if cash <= 0:
+                cash = float(psamount.get("frcr_ord_psbl_amt1", 0))
             if cash > 0:
                 self._cached_cash = cash
                 self._balance_cache_time = now
@@ -118,6 +138,9 @@ class IntradayMonitor:
                 return cash
         except Exception:
             logger.warning("purchasable_amount_fetch_failed", exc_info=True)
+
+        # API 간 rate limit 회피 — 1초 대기
+        await asyncio.sleep(1.0)
 
         # Fallback: get_balance summary
         try:
@@ -135,8 +158,11 @@ class IntradayMonitor:
         # Last resort: use stale cache
         if self._cached_cash is not None:
             logger.info("balance_using_stale_cache", cash=self._cached_cash)
+            self._balance_cache_time = now  # stale 캐시도 TTL 갱신
             return self._cached_cash
 
+        # 모든 소스 실패 → negative cache (TTL 동안 재시도 방지)
+        self._balance_cache_time = now
         logger.error("balance_all_sources_failed")
         return None
 
@@ -184,6 +210,20 @@ class IntradayMonitor:
         if not self._running:
             return
 
+        # 틱 카운터 & 주기적 상태 로그 (5분마다)
+        self._tick_count += 1
+        self._last_prices[ticker] = price
+        now_mono = time.monotonic()
+        if now_mono - self._last_status_log_time >= self._STATUS_LOG_INTERVAL:
+            self._last_status_log_time = now_mono
+            logger.info(
+                "intraday_status_heartbeat",
+                tick_count=self._tick_count,
+                unique_tickers=len(self._last_prices),
+                latest_prices=dict(sorted(self._last_prices.items())[:5]),
+                signals_count=len(self.precomputed_signals),
+            )
+
         # 사전 계산 데이터가 없으면 무시
         signals = self.precomputed_signals.get(ticker)
         if signals is None:
@@ -201,6 +241,10 @@ class IntradayMonitor:
 
         # ── Priority 2: 피라미딩 체크 ──
         if position is not None and position.can_add_unit:
+            # 쿨다운 체크: 이전 시도 실패 후 60초 대기
+            cd = self._pyramid_cooldown.get(ticker, 0.0)
+            if now_mono - cd < self._SIGNAL_COOLDOWN:
+                return
             if await self._db.has_submitted_order(ticker, "SELL"):
                 return
 
@@ -220,6 +264,10 @@ class IntradayMonitor:
 
         # ── Priority 3: 신규 진입 체크 ──
         if position is None and self.market_filter_pass:
+            # 쿨다운 체크: 이전 시도 실패 후 60초 대기
+            cd = self._entry_cooldown.get(ticker, 0.0)
+            if now_mono - cd < self._SIGNAL_COOLDOWN:
+                return
             # 이전 S1 돌파 결과 조회 (System 1 필터)
             last_s1_winner = await self._breakout_tracker.was_last_breakout_winner(ticker)
 
@@ -265,7 +313,7 @@ class IntradayMonitor:
             timestamp: 이벤트 시각.
         """
         if await self._db.has_submitted_order(ticker, "SELL", "STOP_LOSS"):
-            logger.info("stop_loss_skipped_pending_order", ticker=ticker)
+            logger.debug("stop_loss_skipped_pending_order", ticker=ticker)
             return
 
         logger.warning(
@@ -328,12 +376,13 @@ class IntradayMonitor:
             timestamp: 이벤트 시각.
         """
         if await self._db.has_submitted_order(ticker, "BUY", "PYRAMID"):
-            logger.info("pyramid_skipped_pending_order", ticker=ticker)
+            logger.debug("pyramid_skipped_pending_order", ticker=ticker)
             return
 
         cash = await self._get_cached_cash()
         if cash is None:
             logger.error("pyramid_skipped_no_balance", ticker=ticker)
+            self._pyramid_cooldown[ticker] = time.monotonic()
             return
         open_positions = await self._position_mgr.get_open_positions()
         total_position_value = sum(p.total_cost for p in open_positions)
@@ -354,6 +403,18 @@ class IntradayMonitor:
             return
 
         shares = sizing["shares"]
+
+        # 현금 부족 사전 체크 — API 호출 낭비 방지
+        required_cash = shares * price * 1.01  # 1% 버퍼
+        if cash < required_cash:
+            logger.info(
+                "pyramid_skipped_insufficient_cash",
+                ticker=ticker,
+                cash=round(cash, 2),
+                required=round(required_cash, 2),
+            )
+            self._pyramid_cooldown[ticker] = time.monotonic()
+            return
 
         risk_check = await self._risk_mgr.can_add_unit(
             ticker=ticker,
@@ -402,6 +463,17 @@ class IntradayMonitor:
         )
         self.invalidate_balance_cache()
 
+        # 주문 실패 시 쿨다운 설정 후 중단
+        if order.status == OrderStatus.FAILED:
+            logger.warning(
+                "pyramid_order_failed",
+                ticker=ticker,
+                shares=shares,
+                price=price,
+            )
+            self._pyramid_cooldown[ticker] = time.monotonic()
+            return
+
         logger.info(
             "pyramid_order_submitted",
             ticker=ticker,
@@ -447,7 +519,7 @@ class IntradayMonitor:
             timestamp: 이벤트 시각.
         """
         if await self._db.has_submitted_order(ticker, "BUY", "ENTRY"):
-            logger.info("entry_skipped_pending_order", ticker=ticker)
+            logger.debug("entry_skipped_pending_order", ticker=ticker)
             return
 
         # 안전장치: 같은 종목에 오늘 FAILED 진입 주문이 3개 이상이면 차단
@@ -465,6 +537,7 @@ class IntradayMonitor:
         cash = await self._get_cached_cash()
         if cash is None:
             logger.error("entry_skipped_no_balance", ticker=ticker)
+            self._entry_cooldown[ticker] = time.monotonic()
             return
 
         open_positions = await self._position_mgr.get_open_positions()
@@ -486,6 +559,18 @@ class IntradayMonitor:
             return
 
         shares = sizing["shares"]
+
+        # 현금 부족 사전 체크 — API 호출 낭비 방지
+        required_cash = shares * price * 1.01  # 1% 버퍼
+        if cash < required_cash:
+            logger.info(
+                "entry_skipped_insufficient_cash",
+                ticker=ticker,
+                cash=round(cash, 2),
+                required=round(required_cash, 2),
+            )
+            self._entry_cooldown[ticker] = time.monotonic()
+            return
 
         # 리스크 체크
         risk_check = await self._risk_mgr.can_enter_position(
@@ -546,6 +631,17 @@ class IntradayMonitor:
         )
         self.invalidate_balance_cache()
 
+        # 주문 실패 시 쿨다운 설정 후 중단
+        if order.status == OrderStatus.FAILED:
+            logger.warning(
+                "entry_order_failed",
+                ticker=ticker,
+                shares=shares,
+                price=price,
+            )
+            self._entry_cooldown[ticker] = time.monotonic()
+            return
+
         logger.info(
             "entry_order_submitted",
             ticker=ticker,
@@ -591,7 +687,7 @@ class IntradayMonitor:
             timestamp: 이벤트 시각.
         """
         if await self._db.has_submitted_order(ticker, "SELL", "EXIT"):
-            logger.info("donchian_exit_skipped_pending_order", ticker=ticker)
+            logger.debug("donchian_exit_skipped_pending_order", ticker=ticker)
             return
 
         # Donchian 청산은 장 마감 15분 전부터만 체크 (장중 일시적 하락에 의한 조기 청산 방지)

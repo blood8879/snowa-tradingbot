@@ -221,14 +221,12 @@ class RiskManager:
         if not allowed:
             logger.warning(
                 "pyramid_blocked",
-                ticker=ticker,
                 violations=violations,
                 **details,
             )
         else:
             logger.debug(
                 "pyramid_allowed",
-                ticker=ticker,
                 **details,
             )
 

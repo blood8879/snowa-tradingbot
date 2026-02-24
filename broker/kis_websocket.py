@@ -81,6 +81,7 @@ class KISWebSocket:
         self._reconnect_count = 0
         self._first_tick_logged = False
         self._rest_fallback_active = False
+        self._approval_invalid = False  # "invalid approval" 에러 감지 플래그
 
     @property
     def status(self) -> WebSocketStatus:
@@ -109,6 +110,16 @@ class KISWebSocket:
 
         while self._running:
             try:
+                # "invalid approval" 감지 시 approval key 갱신
+                if self._approval_invalid:
+                    logger.info("ws_refreshing_approval_key")
+                    try:
+                        await self._auth.refresh_approval_key()
+                        self._approval_invalid = False
+                        logger.info("ws_approval_key_refreshed")
+                    except Exception as e:
+                        logger.error("ws_approval_key_refresh_failed", error=str(e))
+
                 # WS 연결 성공 → REST 폴백 중지
                 if rest_fallback_task and not rest_fallback_task.done():
                     rest_fallback_task.cancel()
@@ -121,17 +132,21 @@ class KISWebSocket:
                     break
                 logger.error("ws_connection_error", error=str(e))
 
-                # 3회 연속 실패 시 REST 폴백 시작
-                if (
-                    self._rest_client
-                    and self._reconnect_count >= 3
-                    and not self._rest_fallback_active
-                ):
-                    rest_fallback_task = asyncio.create_task(
-                        self._rest_fallback_polling()
-                    )
+            # 항상 reconnect 처리 (정상 종료 / 예외 모두)
+            if not self._running:
+                break
 
-                await self._handle_reconnect()
+            # 3회 연속 실패 시 REST 폴백 시작
+            if (
+                self._rest_client
+                and self._reconnect_count >= 3
+                and not self._rest_fallback_active
+            ):
+                rest_fallback_task = asyncio.create_task(
+                    self._rest_fallback_polling()
+                )
+
+            await self._handle_reconnect()
 
         # 종료 시 폴백 정리
         if rest_fallback_task and not rest_fallback_task.done():
@@ -178,6 +193,12 @@ class KISWebSocket:
                 )
                 for task in pending:
                     task.cancel()
+                # done 태스크의 exception 회수 → "Task exception was never retrieved" 경고 방지
+                for task in done:
+                    try:
+                        task.result()
+                    except Exception:
+                        pass  # 재연결 로직에서 처리
             except asyncio.CancelledError:
                 listener.cancel()
                 heartbeat.cancel()
@@ -256,13 +277,22 @@ class KISWebSocket:
             body = data.get("body", {})
             rt_cd = body.get("rt_cd", "")
             msg = body.get("msg1", "")
-            logger.info(
-                "ws_json_response",
-                tr_id=tr_id,
-                tr_key=tr_key,
-                rt_cd=rt_cd,
-                msg=msg,
-            )
+            # "invalid approval" 에러 감지 → 재연결 시 approval key 갱신
+            if rt_cd == "1" and "invalid approval" in msg.lower():
+                self._approval_invalid = True
+                logger.warning(
+                    "ws_approval_invalid_detected",
+                    tr_key=tr_key,
+                    msg=msg,
+                )
+            else:
+                logger.info(
+                    "ws_json_response",
+                    tr_id=tr_id,
+                    tr_key=tr_key,
+                    rt_cd=rt_cd,
+                    msg=msg,
+                )
         except json.JSONDecodeError:
             logger.warning("ws_json_parse_error", message=message[:200])
 
