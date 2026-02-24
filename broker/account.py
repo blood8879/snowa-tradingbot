@@ -191,7 +191,7 @@ class AccountManager:
             # 스톱 가격은 10% 고정 (정확한 ATR 없으므로)
             stop_price = avg_price * 0.90
 
-            await self._db.conn.execute(
+            cursor_insert = await self._db.conn.execute(
                 """INSERT INTO positions
                    (ticker, system, status, total_shares, total_cost,
                     avg_entry_price, current_stop_price, n_at_entry,
@@ -200,13 +200,24 @@ class AccountManager:
                 (ticker, qty, total_cost, avg_price, stop_price,
                  bp.get("sector"), bp.get("industry"), now_str),
             )
+            new_pos_id = cursor_insert.lastrowid
+
+            # 유닛도 함께 생성 (1유닛으로 통합)
+            await self._db.conn.execute(
+                """INSERT INTO units
+                   (position_id, unit_number, entry_price, shares,
+                    entry_stop_price, current_stop_price, entered_at)
+                   VALUES (?, 1, ?, ?, ?, ?, ?)""",
+                (new_pos_id, avg_price, qty, stop_price, stop_price, now_str),
+            )
+
             fixed_broker_only += 1
             logger.warning(
                 "sync_created_broker_only",
                 ticker=ticker,
                 quantity=qty,
                 avg_price=avg_price,
-                msg="DB에 없는 브로커 포지션 → OPEN 생성",
+                msg="DB에 없는 브로커 포지션 → OPEN + 유닛 생성",
             )
 
         # ── matched: 수량 불일치 시 DB 업데이트 ──
@@ -230,7 +241,38 @@ class AccountManager:
                     broker_shares=broker_shares,
                 )
 
-        if fixed_db_only or fixed_broker_only or fixed_qty_mismatch:
+        # ── 유닛 없는 OPEN 포지션 복구 ──
+        fixed_missing_units = 0
+        unit_check = await self._db.conn.execute(
+            """SELECT p.id, p.ticker, p.total_shares, p.avg_entry_price,
+                      p.current_stop_price, p.opened_at
+               FROM positions p
+               LEFT JOIN units u ON u.position_id = p.id
+               WHERE p.status = 'OPEN'
+               GROUP BY p.id
+               HAVING COUNT(u.id) = 0"""
+        )
+        missing_unit_rows = await unit_check.fetchall()
+        for row in missing_unit_rows:
+            pos_id, ticker, shares, avg_price, stop_price, opened_at = row
+            await self._db.conn.execute(
+                """INSERT INTO units
+                   (position_id, unit_number, entry_price, shares,
+                    entry_stop_price, current_stop_price, entered_at)
+                   VALUES (?, 1, ?, ?, ?, ?, ?)""",
+                (pos_id, avg_price, shares, stop_price, stop_price,
+                 opened_at or now_str),
+            )
+            fixed_missing_units += 1
+            logger.warning(
+                "sync_created_missing_unit",
+                ticker=ticker,
+                position_id=pos_id,
+                shares=shares,
+                msg="유닛 없는 포지션에 복구 유닛 생성",
+            )
+
+        if fixed_db_only or fixed_broker_only or fixed_qty_mismatch or fixed_missing_units:
             await self._db.conn.commit()
 
         result = {
@@ -240,6 +282,7 @@ class AccountManager:
             "fixed_db_only": fixed_db_only,
             "fixed_broker_only": fixed_broker_only,
             "fixed_qty_mismatch": fixed_qty_mismatch,
+            "fixed_missing_units": fixed_missing_units,
         }
 
         if not broker_only and not db_only and not fixed_qty_mismatch:
