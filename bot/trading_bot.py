@@ -153,7 +153,14 @@ class TradingBot:
 
         await self._initialize_auth_with_retry(max_retries=5, base_delay=120)
 
-        # Step 2.5: 최초 실행 시 시작 잔고 기록
+        # Step 2.5: 브로커 포지션 동기화 (DB ↔ 브로커 불일치 방지)
+        try:
+            sync_result = await self._account_mgr.sync_positions()
+            logger.info("startup_sync_positions", **sync_result)
+        except Exception as exc:
+            logger.warning("startup_sync_positions_failed", error=str(exc))
+
+        # Step 2.6: 최초 실행 시 시작 잔고 기록
         await self._record_starting_equity()
 
         # Step 3: 봇 상태 DB 기록

@@ -450,6 +450,18 @@ class IntradayMonitor:
             logger.info("entry_skipped_pending_order", ticker=ticker)
             return
 
+        # 안전장치: 같은 종목에 오늘 FAILED 진입 주문이 3개 이상이면 차단
+        # (fill check 실패로 반복 주문하는 루프 방지)
+        failed_count = await self._db.count_failed_entry_orders_today(ticker)
+        if failed_count >= 3:
+            logger.warning(
+                "entry_blocked_too_many_failures",
+                ticker=ticker,
+                failed_count=failed_count,
+                msg="오늘 실패 주문 3회 초과 — 반복 진입 차단",
+            )
+            return
+
         cash = await self._get_cached_cash()
         if cash is None:
             logger.error("entry_skipped_no_balance", ticker=ticker)

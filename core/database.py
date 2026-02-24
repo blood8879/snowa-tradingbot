@@ -401,6 +401,28 @@ class Database:
 
         return has_active
 
+    async def count_failed_entry_orders_today(self, ticker: str) -> int:
+        """Count FAILED ENTRY orders for a ticker created today (UTC).
+
+        Used as a safety guard to prevent repeated entry attempts when
+        fill confirmation is broken.
+        """
+        from datetime import datetime, timezone
+
+        today_start = datetime.now(timezone.utc).replace(
+            hour=0, minute=0, second=0, microsecond=0,
+        ).isoformat()
+        cursor = await self.conn.execute(
+            """
+            SELECT COUNT(*) FROM orders
+            WHERE ticker = ? AND side = 'BUY' AND order_type = 'ENTRY'
+              AND status = 'FAILED' AND created_at >= ?
+            """,
+            (ticker, today_start),
+        )
+        row = await cursor.fetchone()
+        return row[0] if row else 0
+
     async def table_exists(self, table_name: str) -> bool:
         """Check if a table exists in the database."""
         cursor = await self.conn.execute(
