@@ -96,6 +96,10 @@ export interface WatchlistStock {
   latest_financial_date: string | null;
   n_value: number | null;
   avg_volume_50d: number | null;
+  unit_shares: number | null;
+  unit_value: number | null;
+  unit_stop_price: number | null;
+  max_position_value: number | null;
 }
 
 export interface WatchlistResponse {

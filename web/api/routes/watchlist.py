@@ -9,9 +9,11 @@ from __future__ import annotations
 import structlog
 from fastapi import APIRouter, Depends
 
+from broker.account import AccountManager
 from core.database import Database
+from portfolio.position_sizer import calculate_unit_shares, calculate_max_position_value
 from strategy.atr import calculate_n_single
-from web.api.dependencies import get_db, verify_api_key
+from web.api.dependencies import get_db, get_account_manager, verify_api_key
 
 logger = structlog.get_logger(__name__)
 
@@ -62,7 +64,10 @@ async def _calc_avg_volume_50d(db: Database, ticker: str) -> float | None:
 
 
 @router.get("/watchlist", dependencies=[Depends(verify_api_key)])
-async def get_watchlist(db: Database = Depends(get_db)) -> dict:
+async def get_watchlist(
+    db: Database = Depends(get_db),
+    account_mgr: AccountManager | None = Depends(get_account_manager),
+) -> dict:
     """Return active watchlist stocks sorted by composite score (descending).
 
     Returns:
@@ -96,11 +101,43 @@ async def get_watchlist(db: Database = Depends(get_db)) -> dict:
     )
     rows = await cursor.fetchall()
 
+    # 실시간 계좌 equity 조회 (유닛 사이징 계산용)
+    account_equity = 0.0
+    if account_mgr is not None:
+        try:
+            info = await account_mgr.get_account_info()
+            account_equity = info.total_equity
+        except Exception as exc:
+            logger.warning("watchlist_equity_fetch_failed", error=str(exc))
+
+    max_position_value = (
+        round(calculate_max_position_value(account_equity), 2)
+        if account_equity > 0
+        else None
+    )
+
     stocks = []
     for r in rows:
         ticker = r[0]
+        latest_price = r[15]
         n_value = await _calc_n_value(db, ticker)
         avg_volume_50d = await _calc_avg_volume_50d(db, ticker)
+
+        # 1유닛 사이징 계산
+        unit_shares = None
+        unit_value = None
+        unit_stop_price = None
+        if account_equity > 0 and n_value and latest_price and latest_price > 0:
+            sizing = calculate_unit_shares(
+                account_equity=account_equity,
+                entry_price=latest_price,
+                n_value=n_value,
+                avg_daily_volume=int(avg_volume_50d) if avg_volume_50d else None,
+            )
+            if not sizing.get("skip"):
+                unit_shares = sizing["shares"]
+                unit_value = round(sizing["position_value"], 2)
+                unit_stop_price = round(sizing["stop_price"], 2)
 
         stocks.append({
             "ticker": ticker,
@@ -118,10 +155,18 @@ async def get_watchlist(db: Database = Depends(get_db)) -> dict:
             "avg_daily_volume": r[12],
             "market_cap": r[13],
             "status": r[14],
-            "latest_price": r[15],
+            "latest_price": latest_price,
             "latest_financial_date": r[16],
             "n_value": n_value,
             "avg_volume_50d": avg_volume_50d,
+            "unit_shares": unit_shares,
+            "unit_value": unit_value,
+            "unit_stop_price": unit_stop_price,
+            "max_position_value": max_position_value,
         })
 
-    return {"watchlist": stocks, "count": len(stocks)}
+    return {
+        "watchlist": stocks,
+        "count": len(stocks),
+        "account_equity": round(account_equity, 2) if account_equity > 0 else None,
+    }

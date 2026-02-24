@@ -96,6 +96,36 @@ function getColumns(realtimeData?: RealtimePricesResponse): Column<WatchlistStoc
       ),
     },
     {
+      key: 'unit_shares',
+      header: '1유닛 수량',
+      sortable: true,
+      render: (row) => (
+        <span className="text-cyan-300 tabular-nums font-medium">
+          {row.unit_shares != null ? row.unit_shares.toLocaleString() : '—'}
+        </span>
+      ),
+    },
+    {
+      key: 'unit_value',
+      header: '1유닛 금액',
+      sortable: true,
+      render: (row) => (
+        <span className="text-cyan-300 tabular-nums font-medium">
+          {row.unit_value != null ? `$${row.unit_value.toLocaleString()}` : '—'}
+        </span>
+      ),
+    },
+    {
+      key: 'max_position_value',
+      header: '최대 보유',
+      sortable: true,
+      render: (row) => (
+        <span className="text-violet-300 tabular-nums font-medium">
+          {row.max_position_value != null ? `$${row.max_position_value.toLocaleString()}` : '—'}
+        </span>
+      ),
+    },
+    {
       key: 'custom_composite_score',
       header: '점수',
       sortable: true,
@@ -208,6 +238,18 @@ function sortWatchlist(
       case 'n_value':
         aVal = a.n_value;
         bVal = b.n_value;
+        break;
+      case 'unit_shares':
+        aVal = a.unit_shares;
+        bVal = b.unit_shares;
+        break;
+      case 'unit_value':
+        aVal = a.unit_value;
+        bVal = b.unit_value;
+        break;
+      case 'max_position_value':
+        aVal = a.max_position_value;
+        bVal = b.max_position_value;
         break;
       case 'avg_volume_50d':
         aVal = a.avg_volume_50d;
