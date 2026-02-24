@@ -48,6 +48,10 @@ export interface Position {
   closed_at: string | null;
   close_reason: string | null;
   realized_pnl: number | null;
+  current_price: number | null;
+  eval_amount: number | null;
+  unrealized_pnl: number | null;
+  unrealized_pnl_pct: number | null;
   units: Unit[];
 }
 

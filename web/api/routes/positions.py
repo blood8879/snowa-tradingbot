@@ -143,6 +143,23 @@ async def get_positions(
 
     broker_positions = await _fetch_broker_positions(account_mgr)
 
+    # 브로커 데이터를 ticker 기준으로 인덱싱
+    broker_by_ticker = {bp["ticker"]: bp for bp in broker_positions}
+
+    # Bot 포지션에 미실현 손익(현재가, 평가금액, P&L) 병합
+    for pos in db_positions:
+        bp = broker_by_ticker.get(pos["ticker"])
+        if bp:
+            pos["current_price"] = bp["current_price"]
+            pos["eval_amount"] = bp["eval_amount"]
+            pos["unrealized_pnl"] = bp["pnl_amount"]
+            pos["unrealized_pnl_pct"] = bp["pnl_pct"]
+        else:
+            pos["current_price"] = None
+            pos["eval_amount"] = None
+            pos["unrealized_pnl"] = None
+            pos["unrealized_pnl_pct"] = None
+
     # Mark broker positions that are NOT tracked by the bot
     broker_only = [
         bp for bp in broker_positions if bp["ticker"] not in db_tickers

@@ -61,11 +61,24 @@ const positionColumns: Column<Position>[] = [
     ),
   },
   {
-    key: 'total_cost',
-    header: '총 비용',
-    render: (row) => (
-      <span className="text-slate-300 tabular-nums">${row.total_cost.toLocaleString()}</span>
-    ),
+    key: 'current_price',
+    header: '현재가',
+    render: (row) =>
+      row.current_price != null ? (
+        <span className="text-slate-300 tabular-nums">${row.current_price.toFixed(2)}</span>
+      ) : (
+        <span className="text-slate-500">—</span>
+      ),
+  },
+  {
+    key: 'eval_amount',
+    header: '평가금액',
+    render: (row) =>
+      row.eval_amount != null ? (
+        <span className="text-slate-300 tabular-nums">${row.eval_amount.toLocaleString()}</span>
+      ) : (
+        <span className="text-slate-500">—</span>
+      ),
   },
   {
     key: 'current_stop_price',
@@ -75,11 +88,23 @@ const positionColumns: Column<Position>[] = [
     ),
   },
   {
-    key: 'realized_pnl',
+    key: 'unrealized_pnl',
     header: '손익',
     render: (row) =>
-      row.realized_pnl != null ? (
+      row.unrealized_pnl != null ? (
+        <PnlText value={row.unrealized_pnl} />
+      ) : row.realized_pnl != null ? (
         <PnlText value={row.realized_pnl} />
+      ) : (
+        <span className="text-slate-500">—</span>
+      ),
+  },
+  {
+    key: 'unrealized_pnl_pct',
+    header: '수익률',
+    render: (row) =>
+      row.unrealized_pnl_pct != null ? (
+        <PnlText value={row.unrealized_pnl_pct} suffix="%" />
       ) : (
         <span className="text-slate-500">—</span>
       ),
