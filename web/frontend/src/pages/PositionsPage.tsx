@@ -82,7 +82,7 @@ const positionColumns: Column<Position>[] = [
   },
   {
     key: 'current_stop_price',
-    header: '스톱가',
+    header: '손절가',
     render: (row) => (
       <span className="text-slate-300 tabular-nums">${row.current_stop_price.toFixed(2)}</span>
     ),
@@ -124,8 +124,8 @@ function ExpandedUnits({ position }: { position: Position }) {
               <th className="px-3 py-1.5 text-left font-medium">유닛#</th>
               <th className="px-3 py-1.5 text-left font-medium">진입가</th>
               <th className="px-3 py-1.5 text-left font-medium">수량</th>
-              <th className="px-3 py-1.5 text-left font-medium">진입스톱</th>
-              <th className="px-3 py-1.5 text-left font-medium">현재스톱</th>
+              <th className="px-3 py-1.5 text-left font-medium">진입손절가</th>
+              <th className="px-3 py-1.5 text-left font-medium">현재손절가</th>
               <th className="px-3 py-1.5 text-left font-medium">진입일</th>
             </tr>
           </thead>
