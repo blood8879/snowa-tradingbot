@@ -30,7 +30,7 @@ from broker.kis_auth import KISAuth
 from broker.kis_rest import KISRestClient
 from broker.account import AccountManager
 from web.api.dependencies import set_db, set_account_manager
-from web.api.routes import status, positions, watchlist, trades, performance, journal, diary, logs, alerts, realtime_prices
+from web.api.routes import status, positions, watchlist, trades, performance, journal, diary, logs, alerts, realtime_prices, market_control, account_reset, ibd
 
 logger = structlog.get_logger(__name__)
 
@@ -98,6 +98,9 @@ app.include_router(diary.router, prefix="/api")
 app.include_router(logs.router, prefix="/api")
 app.include_router(alerts.router, prefix="/api")
 app.include_router(realtime_prices.router, prefix="/api")
+app.include_router(market_control.router, prefix="/api")
+app.include_router(account_reset.router, prefix="/api")
+app.include_router(ibd.router, prefix="/api")
 
 
 # ── Health Check ─────────────────────────────────────────────

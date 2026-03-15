@@ -81,10 +81,27 @@ class WebSocketStatus(str, Enum):
 
 
 class ExchangeCode(str, Enum):
-    """KIS exchange codes for US stocks."""
+    """KIS exchange codes for US and Korean stocks."""
+    # US Markets
     NASD = "NASD"  # NASDAQ
     NYSE = "NYSE"  # New York Stock Exchange
     AMEX = "AMEX"  # American Stock Exchange
+    # Korean Markets
+    KOSPI = "KOSPI"    # Korea Composite Stock Price Index
+    KOSDAQ = "KOSDAQ"  # Korean Securities Dealers Automated Quotations
+
+
+class IBDMarketStatus(str, Enum):
+    CONFIRMED_UPTREND = "CONFIRMED_UPTREND"
+    UPTREND_UNDER_PRESSURE = "UPTREND_UNDER_PRESSURE"
+    MARKET_IN_CORRECTION = "MARKET_IN_CORRECTION"
+    RALLY_ATTEMPT = "RALLY_ATTEMPT"
+
+
+class IBDDayType(str, Enum):
+    DISTRIBUTION = "DISTRIBUTION"
+    STALLING = "STALLING"
+    FOLLOW_THROUGH = "FOLLOW_THROUGH"
 
 
 # ============================================================
@@ -168,6 +185,9 @@ class Position:
     closed_at: Optional[str] = None
     close_reason: Optional[CloseReason] = None
     realized_pnl: Optional[float] = None
+
+    # Market
+    market: str = "US"
 
     # Units within this position
     units: list[Unit] = field(default_factory=list)
@@ -268,6 +288,9 @@ class DailyLog:
     spy_close: Optional[float] = None
     spy_sma200: Optional[float] = None
     market_filter_pass: bool = False
+    regime: str = "GREEN"
+    breadth_pct: Optional[float] = None
+    roc: Optional[float] = None
 
     # Portfolio
     account_equity: float = 0.0
@@ -311,8 +334,38 @@ class AccountInfo:
     cash_balance: float = 0.0
     total_positions_value: float = 0.0
     currency: str = "USD"
+    market: str = "US"
 
     # Derived
     @property
     def buying_power(self) -> float:
         return self.cash_balance
+
+
+@dataclass
+class IBDDistributionDay:
+    id: Optional[int] = None
+    index_ticker: str = ""
+    date: str = ""
+    day_type: str = "DISTRIBUTION"
+    close_price: float = 0.0
+    price_change_pct: float = 0.0
+    volume: int = 0
+    prior_volume: int = 0
+    expired: bool = False
+    expiry_reason: Optional[str] = None
+    expiry_date: Optional[str] = None
+
+
+@dataclass
+class IBDMarketState:
+    id: Optional[int] = None
+    date: str = ""
+    index_ticker: str = ""
+    status: str = "MARKET_IN_CORRECTION"
+    prior_status: Optional[str] = None
+    distribution_count: int = 0
+    rally_day_count: int = 0
+    ftd_date: Optional[str] = None
+    ftd_low: Optional[float] = None
+    notes: Optional[str] = None

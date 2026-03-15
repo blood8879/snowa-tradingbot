@@ -11,7 +11,9 @@ import { DiaryPage } from '@/pages/DiaryPage';
 import { LogsPage } from '@/pages/LogsPage';
 import { AlertsPage } from '@/pages/AlertsPage';
 import { ExitAlertsPage } from '@/pages/ExitAlertsPage';
+import { IBDMarketDirectionPage } from '@/pages/IBDMarketDirectionPage';
 import { fetcher } from '@/lib/fetcher';
+import { MarketProvider } from '@/hooks/useMarket';
 
 const router = createBrowserRouter([
   {
@@ -27,14 +29,17 @@ const router = createBrowserRouter([
       { path: '/journal', element: <JournalPage /> },
       { path: '/diary', element: <DiaryPage /> },
       { path: '/logs', element: <LogsPage /> },
+      { path: '/ibd', element: <IBDMarketDirectionPage /> },
     ],
   },
 ]);
 
 export default function App() {
   return (
-    <SWRConfig value={{ fetcher, revalidateOnFocus: false, errorRetryCount: 3, dedupingInterval: 5000 }}>
-      <RouterProvider router={router} />
-    </SWRConfig>
+    <MarketProvider>
+      <SWRConfig value={{ fetcher, revalidateOnFocus: false, errorRetryCount: 3, dedupingInterval: 5000 }}>
+        <RouterProvider router={router} />
+      </SWRConfig>
+    </MarketProvider>
   );
 }

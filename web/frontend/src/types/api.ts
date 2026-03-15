@@ -8,7 +8,12 @@ export interface StatusResponse {
   mode: string;
   market_filter: string;
   market_filter_pass: boolean;
-  spy: {
+  regime?: string;
+  regime_scale?: number;
+  breadth_pct?: number | null;
+  roc?: number | null;
+  benchmark: {
+    name: string;
     close: number | null;
     sma200: number | null;
   };
@@ -18,6 +23,7 @@ export interface StatusResponse {
   cash_balance: number;
   positions_value: number;
   ws_status: string;
+  market?: string;
 }
 
 // ── GET /api/positions ───────────────────────────
@@ -35,6 +41,7 @@ export interface Unit {
 export interface Position {
   id: number;
   ticker: string;
+  name: string | null;
   system: string;
   status: string;
   total_shares: number;
@@ -53,10 +60,12 @@ export interface Position {
   unrealized_pnl: number | null;
   unrealized_pnl_pct: number | null;
   units: Unit[];
+  market?: string;
 }
 
 export interface BrokerPosition {
   ticker: string;
+  name: string | null;
   exchange: string;
   quantity: number;
   avg_price: number;
@@ -78,6 +87,7 @@ export interface PositionsResponse {
 
 export interface WatchlistStock {
   ticker: string;
+  name: string | null;
   added_date: string;
   last_screened: string;
   quarterly_eps_growth: number | null;
@@ -100,21 +110,26 @@ export interface WatchlistStock {
   unit_value: number | null;
   unit_stop_price: number | null;
   max_position_value: number | null;
+  market?: string;
 }
 
 export interface WatchlistResponse {
   watchlist: WatchlistStock[];
   count: number;
+  market?: string;
 }
 
 // ── GET /api/trades ──────────────────────────────
 
 export interface Trade {
-  id: number;
+  id: number | string;
   broker_order_id: string | null;
   ticker: string;
+  name?: string | null;
   side: string;
   order_type: string;
+  trade_type?: string;
+  trade_system?: string;
   requested_shares: number;
   requested_price: number;
   filled_shares: number;
@@ -124,13 +139,17 @@ export interface Trade {
   updated_at: string;
   filled_at: string | null;
   notes: string | null;
+  source?: string;
 }
 
 export interface TradesResponse {
   trades: Trade[];
+  broker_trades?: Trade[];
   total: number;
+  broker_total?: number;
   limit: number;
   offset: number;
+  market?: string;
 }
 
 // ── GET /api/pnl ─────────────────────────────────
@@ -156,12 +175,14 @@ export interface PnlResponse {
     max_drawdown_pct: number;
     data_points: number;
   };
+  market?: string;
 }
 
 // ── GET /api/journal ─────────────────────────────
 
 export interface JournalTrade {
   ticker: string;
+  name?: string | null;
   system: string;
   realized_pnl: number;
   opened_at: string;
@@ -169,6 +190,7 @@ export interface JournalTrade {
   close_reason: string;
   avg_entry_price: number;
   stop_price: number;
+  exit_price: number;
   total_shares: number;
   risk_per_share: number;
 }
@@ -225,6 +247,7 @@ export interface JournalContext {
 export interface DiaryEntry {
   order_id: number;
   ticker: string;
+  name?: string | null;
   side: string;
   order_type: string;
   requested_shares: number;
@@ -317,6 +340,7 @@ export interface BotHealthResponse {
 
 export interface NearEntryAlert {
   ticker: string;
+  name: string | null;
   latest_price: number;
   donchian_upper_20: number;
   donchian_upper_55: number | null;
@@ -358,6 +382,7 @@ export interface RealtimePricesResponse {
 
 export interface ExitAlert {
   ticker: string;
+  name: string | null;
   position_side: string;
   entry_price: number;
   current_price: number;
@@ -374,4 +399,38 @@ export interface ExitAlertsResponse {
   total: number;
   critical_count: number;
   warning_count: number;
+}
+
+// ── Market Status ─────────────────────────────────
+
+export interface MarketInfo {
+  market_id: string;
+  display_name: string;
+  enabled: boolean;
+  currency: string;
+  exchanges: string[];
+}
+
+export interface MarketStatusResponse {
+  markets: MarketInfo[];
+}
+
+export interface MarketToggleResponse {
+  market_id: string;
+  enabled: boolean;
+  success: boolean;
+}
+
+// ── POST /api/account/reset ─────────────────────
+
+export interface AccountResetResponse {
+  success: boolean;
+  mode: string;
+  reset_at: string;
+  closed_positions: number;
+  cancelled_orders: number;
+  cleared_state_keys: number;
+  account_equity: number | null;
+  cash_balance: number | null;
+  currency: string;
 }

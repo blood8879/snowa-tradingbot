@@ -19,7 +19,6 @@ from typing import Any
 import structlog
 
 from config.constants import (
-    FUNDAMENTAL_UPDATE_MONTHS,
     YFINANCE_BATCH_DELAY,
     YFINANCE_BATCH_SIZE,
     YFINANCE_RATE_LIMIT_BACKOFF_MULT,
@@ -49,21 +48,35 @@ class FundamentalDataManager:
 
     # ── Public API ───────────────────────────────────────────
 
-    async def fetch_and_store_fundamentals(self, ticker: str) -> int:
+    async def fetch_and_store_fundamentals(self, ticker: str, *, market: str = "US") -> int:
         """Fetch quarterly + annual financial data for *ticker* and persist.
+
+        Args:
+            ticker: Stock ticker symbol
+            market: "US" for US stocks (yfinance), "KR" for Korean stocks (pykrx)
 
         Returns the number of new records inserted (0 on error).
         """
         try:
             loop = asyncio.get_event_loop()
-            records = await loop.run_in_executor(
-                None, self._fetch_yfinance_data, ticker
-            )
+            if market == "KR":
+                records = await loop.run_in_executor(
+                    None, self._fetch_pykrx_data, ticker
+                )
+            else:
+                records = await loop.run_in_executor(
+                    None, self._fetch_yfinance_data, ticker
+                )
             if not records:
+                logger.debug(
+                    "fetch_fundamentals_empty",
+                    ticker=ticker,
+                    market=market,
+                )
                 return 0
             return await self._store_records(records)
         except Exception:
-            logger.warning("fetch_fundamentals_failed", ticker=ticker, exc_info=True)
+            logger.warning("fetch_fundamentals_failed", ticker=ticker, market=market, exc_info=True)
             return 0
 
     async def get_quarterly_eps(
@@ -134,15 +147,31 @@ class FundamentalDataManager:
         tickers: list[str],
         batch_size: int = YFINANCE_BATCH_SIZE,
         delay: float = YFINANCE_BATCH_DELAY,
+        *,
+        market: str = "US",
     ) -> int:
         """Fetch fundamentals for many tickers sequentially with rate-limiting.
+
+        Args:
+            tickers: List of ticker symbols
+            batch_size: Number of tickers to process before logging progress
+            delay: Delay between batches
+            market: "US" for US stocks (yfinance), "KR" for Korean stocks (pykrx)
 
         Returns total number of new records inserted.
         """
         total = 0
+        empty_tickers: list[str] = []
+        per_request_delay = 0.5 if market == "US" else 0.1
+
         for idx, ticker in enumerate(tickers, start=1):
-            count = await self.fetch_and_store_fundamentals(ticker)
+            count = await self.fetch_and_store_fundamentals(ticker, market=market)
             total += count
+            if count == 0:
+                empty_tickers.append(ticker)
+
+            # Per-request delay to avoid yfinance rate limiting
+            await asyncio.sleep(per_request_delay)
 
             if idx % batch_size == 0:
                 logger.info(
@@ -150,13 +179,51 @@ class FundamentalDataManager:
                     completed=idx,
                     total_tickers=len(tickers),
                     new_records_so_far=total,
+                    empty_so_far=len(empty_tickers),
+                    market=market,
                 )
                 await asyncio.sleep(delay)
+
+        # Retry pass for tickers that returned empty data
+        if empty_tickers and market == "US":
+            retry_count = min(len(empty_tickers), 200)
+            retry_targets = empty_tickers[:retry_count]
+            logger.info(
+                "bulk_fetch_retry_start",
+                empty_count=len(empty_tickers),
+                retry_count=retry_count,
+                sample=retry_targets[:10],
+                market=market,
+            )
+            retry_total = 0
+            still_empty = 0
+            for idx, ticker in enumerate(retry_targets, start=1):
+                # Longer delay on retry to avoid rate limits
+                await asyncio.sleep(1.5)
+                count = await self.fetch_and_store_fundamentals(ticker, market=market)
+                retry_total += count
+                if count == 0:
+                    still_empty += 1
+
+                if idx % 50 == 0:
+                    await asyncio.sleep(delay * 2)
+
+            total += retry_total
+            logger.info(
+                "bulk_fetch_retry_complete",
+                retried=retry_count,
+                new_records=retry_total,
+                still_empty=still_empty,
+                market=market,
+            )
 
         logger.info(
             "bulk_fetch_complete",
             total_tickers=len(tickers),
             total_new_records=total,
+            empty_count=len(empty_tickers),
+            success_rate=f"{((len(tickers) - len(empty_tickers)) / len(tickers) * 100):.1f}%" if tickers else "N/A",
+            market=market,
         )
         return total
 
@@ -164,8 +231,15 @@ class FundamentalDataManager:
         self,
         ticker: str,
         earnings_tickers: set[str] | None = None,
+        *,
+        market: str = "US",
     ) -> bool:
         """Determine whether *ticker* needs a fundamental data refresh.
+
+        Args:
+            ticker: Stock ticker symbol
+            earnings_tickers: Set of tickers that recently reported earnings
+            market: "US" for US stocks, "KR" for Korean stocks
 
         Returns True when:
         - The ticker is in *earnings_tickers* (recently reported earnings)
@@ -178,10 +252,6 @@ class FundamentalDataManager:
             return True
 
         now = datetime.now()
-
-        # Fallback: force update during earnings-season months
-        if now.month in FUNDAMENTAL_UPDATE_MONTHS:
-            return True
 
         cursor = await self._db.conn.execute(
             """
@@ -210,14 +280,81 @@ class FundamentalDataManager:
         latest_period: str = row[0]
         return latest_period < threshold_period
 
-    # ── Internal: sync yfinance helpers (run in executor) ────
+    # ── Internal: sync helpers (run in executor) ─────────────
+
+    def _fetch_pykrx_data(self, ticker: str) -> list[dict]:
+        """Synchronous helper for Korean fundamental data via pykrx.
+
+        pykrx provides basic fundamental data:
+        - PER, PBR, EPS, BPS, DIV via get_market_fundamental_by_date()
+
+        Returns list of fundamental data records (quarterly sampling).
+        """
+        try:
+            from pykrx import stock as pykrx_stock  # noqa: WPS433 — lazy import
+        except ImportError:
+            logger.warning("pykrx_import_failed", ticker=ticker)
+            return []
+
+        from datetime import timedelta  # noqa: WPS433
+
+        records = []
+        now = datetime.now()
+
+        # Get quarterly-ish data by sampling every 3 months
+        for months_ago in range(0, 24, 3):  # Last 2 years, quarterly
+            sample_date = (now - timedelta(days=months_ago * 30)).strftime("%Y%m%d")
+            try:
+                # Get fundamental data for this ticker on this date
+                df = pykrx_stock.get_market_fundamental_by_date(
+                    sample_date, sample_date, ticker
+                )
+                if df is not None and not df.empty:
+                    row = df.iloc[0]
+                    eps = float(row.get("EPS", 0)) if row.get("EPS", 0) != 0 else None
+
+                    sample_datetime = now - timedelta(days=months_ago * 30)
+                    quarter = (sample_datetime.month - 1) // 3 + 1
+                    year = sample_datetime.year
+                    period = f"{year}Q{quarter}"
+
+                    records.append(
+                        {
+                            "ticker": ticker,
+                            "report_date": f"{sample_date[:4]}-{sample_date[4:6]}-{sample_date[6:8]}",
+                            "period": period,
+                            "period_type": "quarterly",
+                            "eps": eps,
+                            "revenue": None,  # pykrx doesn't provide revenue
+                            "net_income": None,
+                            "shares_outstanding": None,
+                            "debt_to_equity": None,
+                        }
+                    )
+            except Exception as exc:
+                logger.debug(
+                    "pykrx_sample_failed",
+                    ticker=ticker,
+                    sample_date=sample_date,
+                    error=str(exc),
+                )
+                continue
+
+        if records:
+            logger.info(
+                "pykrx_data_fetched",
+                ticker=ticker,
+                record_count=len(records),
+            )
+
+        return records
 
     def _fetch_yfinance_data(self, ticker: str) -> list[dict]:
         """Synchronous helper — called via ``run_in_executor``.
 
         Pulls quarterly & annual income-statement data plus balance-sheet
         debt/equity from yfinance and normalises into flat dicts.
-        Retries on YFRateLimitError with exponential backoff.
+        Retries on YFRateLimitError and empty responses with exponential backoff.
         """
         import yfinance as yf  # noqa: WPS433 — intentional lazy import
 
@@ -254,6 +391,18 @@ class FundamentalDataManager:
                 quarterly_bs = ticker_obj.quarterly_balance_sheet
                 if quarterly_bs is not None and not quarterly_bs.empty:
                     self._merge_balance_sheet(records, quarterly_bs, ticker)
+
+                # Retry if yfinance returned empty data (silent rate limit)
+                if not records and attempt < YFINANCE_RATE_LIMIT_MAX_RETRIES:
+                    delay = YFINANCE_RATE_LIMIT_BASE_DELAY * attempt + random.uniform(0, 1.0)
+                    logger.debug(
+                        "yfinance_empty_response_retry",
+                        ticker=ticker,
+                        attempt=attempt,
+                        delay=f"{delay:.1f}s",
+                    )
+                    time.sleep(delay)
+                    continue
 
                 return records
 
@@ -351,6 +500,10 @@ class FundamentalDataManager:
             revenue = self._safe_get_value(df, col_ts, "Total Revenue")
             net_income = self._safe_get_value(df, col_ts, "Net Income")
 
+            # Fallback: derive EPS from net_income / shares_outstanding
+            if eps is None and net_income is not None and shares_outstanding:
+                eps = net_income / shares_outstanding
+
             records.append(
                 {
                     "ticker": ticker,
@@ -439,15 +592,15 @@ class FundamentalDataManager:
     # ── Internal: database persistence ───────────────────────
 
     async def _store_records(self, records: list[dict]) -> int:
-        """INSERT OR IGNORE records into the fundamentals table.
+        """INSERT OR REPLACE records into the fundamentals table.
 
-        Returns the number of rows actually inserted (ignores duplicates).
+        Returns the number of rows actually inserted or updated.
         """
         inserted = 0
         for rec in records:
             cursor = await self._db.conn.execute(
                 """
-                INSERT OR IGNORE INTO fundamentals
+                INSERT OR REPLACE INTO fundamentals
                     (ticker, report_date, period, period_type,
                      eps, revenue, net_income, shares_outstanding,
                      debt_to_equity, updated_at)

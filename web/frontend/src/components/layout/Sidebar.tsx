@@ -13,6 +13,7 @@ import {
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { clsx } from 'clsx';
+import { MarketSelector } from '@/components/ui/MarketSelector';
 
 interface NavItem {
   to: string;
@@ -29,6 +30,7 @@ const NAV_ITEMS: NavItem[] = [
   { to: '/exit-alerts', icon: LogOut, label: '청산알림' },
   { to: '/trades', icon: ArrowLeftRight, label: '매매내역' },
   { to: '/pnl', icon: TrendingUp, label: '손익분석' },
+  { to: '/ibd', icon: TrendingUp, label: 'IBD 시장방향' },
   { to: '/journal', icon: BookOpen, label: '매매일지' },
   { to: '/diary', icon: FileText, label: '종목일기' },
   { to: '/logs', icon: ScrollText, label: '봇 로그' },
@@ -43,6 +45,8 @@ export function Sidebar() {
           <span className="text-slate-100">OWA</span>
         </h1>
       </div>
+
+      <MarketSelector />
 
       <nav className="flex-1 px-3 space-y-1">
         {NAV_ITEMS.map((item) => (

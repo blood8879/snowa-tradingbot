@@ -53,6 +53,7 @@ CREATE TABLE IF NOT EXISTS watchlist (
     market_cap REAL,
     latest_price REAL,
     exchange TEXT DEFAULT 'NASD',
+    market TEXT DEFAULT 'US',
 
     status TEXT DEFAULT 'ACTIVE'
 );
@@ -111,6 +112,7 @@ CREATE TABLE IF NOT EXISTS positions (
 
     sector TEXT,
     industry TEXT,
+    market TEXT DEFAULT 'US',
 
     opened_at TEXT NOT NULL,
     closed_at TEXT,
@@ -162,7 +164,8 @@ CREATE TABLE IF NOT EXISTS orders (
     updated_at TEXT NOT NULL,
     filled_at TEXT,
 
-    notes TEXT
+    notes TEXT,
+    market TEXT DEFAULT 'US'
 );
 
 -- ===================================================================
@@ -186,7 +189,8 @@ CREATE TABLE IF NOT EXISTS breakout_history (
 -- 8. Daily trading log
 -- ===================================================================
 CREATE TABLE IF NOT EXISTS daily_log (
-    date TEXT PRIMARY KEY,
+    date TEXT NOT NULL,
+    market TEXT NOT NULL DEFAULT 'US',
 
     spy_close REAL,
     spy_sma200 REAL,
@@ -204,7 +208,9 @@ CREATE TABLE IF NOT EXISTS daily_log (
 
     entries_count INTEGER DEFAULT 0,
     exits_count INTEGER DEFAULT 0,
-    stop_losses_count INTEGER DEFAULT 0
+    stop_losses_count INTEGER DEFAULT 0,
+
+    PRIMARY KEY (date, market)
 );
 
 -- ===================================================================
@@ -347,13 +353,18 @@ class Database:
 
         Orders older than max_age_seconds with 0 fills are treated as stale
         and automatically marked FAILED to prevent blocking future orders.
+
+        IMPORTANT: Orders with a valid broker_order_id are NOT auto-expired,
+        because the broker confirmed receiving them. They may just need more
+        time for fill confirmation (e.g., due to rate limits on fill-check API).
+        Only orders without broker_order_id (failed submissions) are expired.
         """
         from datetime import datetime, timezone
 
         if order_type:
             cursor = await self.conn.execute(
                 """
-                SELECT id, created_at, filled_shares FROM orders
+                SELECT id, created_at, filled_shares, broker_order_id FROM orders
                 WHERE ticker = ? AND side = ? AND order_type = ?
                   AND status IN ('SUBMITTED', 'PARTIAL')
                 """,
@@ -362,7 +373,7 @@ class Database:
         else:
             cursor = await self.conn.execute(
                 """
-                SELECT id, created_at, filled_shares FROM orders
+                SELECT id, created_at, filled_shares, broker_order_id FROM orders
                 WHERE ticker = ? AND side = ?
                   AND status IN ('SUBMITTED', 'PARTIAL')
                 """,
@@ -376,7 +387,7 @@ class Database:
         now = datetime.now(timezone.utc)
         has_active = False
         for row in rows:
-            order_id, created_at_str, filled_shares = row
+            order_id, created_at_str, filled_shares, broker_order_id = row
             filled = filled_shares or 0
             try:
                 created_at = datetime.fromisoformat(created_at_str)
@@ -385,17 +396,31 @@ class Database:
                 age = 0
 
             if age > max_age_seconds and filled == 0:
-                await self.conn.execute(
-                    "UPDATE orders SET status = 'FAILED', notes = 'auto_expired_stale' WHERE id = ?",
-                    (order_id,),
-                )
-                await self.conn.commit()
-                logger.info(
-                    "stale_order_expired",
-                    order_id=order_id,
-                    ticker=ticker,
-                    age_seconds=int(age),
-                )
+                # 브로커가 확인한 주문(broker_order_id 있음)은 여기서 auto-expire하지 않음.
+                # check_order_fills()가 체결 확인 + 만료를 담당 (매수 2시간, 매도 30분).
+                # has_submitted_order()는 체크 함수이므로 side-effect 없이 대기만 함.
+                if broker_order_id:
+                    has_active = True
+                    logger.debug(
+                        "stale_order_waiting_broker_confirmed",
+                        order_id=order_id,
+                        ticker=ticker,
+                        broker_order_id=broker_order_id,
+                        age_seconds=int(age),
+                    )
+                else:
+                    # broker_order_id 없음 → 제출 자체가 실패한 주문, 즉시 만료
+                    await self.conn.execute(
+                        "UPDATE orders SET status = 'FAILED', notes = 'auto_expired_stale' WHERE id = ?",
+                        (order_id,),
+                    )
+                    await self.conn.commit()
+                    logger.info(
+                        "stale_order_expired",
+                        order_id=order_id,
+                        ticker=ticker,
+                        age_seconds=int(age),
+                    )
             else:
                 has_active = True
 
@@ -474,3 +499,98 @@ class Database:
             """)
             await self.conn.commit()
             logger.info("migration_applied", migration="remove_unique_ticker_status")
+
+        # Migration: Add 'market' column to support dual-market (US + KR)
+        for table in ("watchlist", "positions", "orders", "daily_log"):
+            cursor = await self.conn.execute(f"PRAGMA table_info({table})")
+            columns = {row[1] for row in await cursor.fetchall()}
+            if "market" not in columns:
+                await self.conn.execute(
+                    f"ALTER TABLE {table} ADD COLUMN market TEXT DEFAULT 'US'"
+                )
+                await self.conn.commit()
+                logger.info("migration_applied", migration=f"add_{table}_market_column")
+
+        # Migration: daily_log PK date → (date, market) composite key
+        dl_cursor = await self.conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='daily_log'"
+        )
+        dl_row = await dl_cursor.fetchone()
+        if dl_row and "PRIMARY KEY (date, market)" not in (dl_row[0] or ""):
+            await self.conn.executescript("""
+                CREATE TABLE IF NOT EXISTS daily_log_new (
+                    date TEXT NOT NULL,
+                    market TEXT NOT NULL DEFAULT 'US',
+                    spy_close REAL,
+                    spy_sma200 REAL,
+                    market_filter_pass INTEGER,
+                    account_equity REAL,
+                    cash_balance REAL,
+                    total_positions INTEGER,
+                    total_units INTEGER,
+                    daily_pnl REAL,
+                    daily_pnl_pct REAL,
+                    cumulative_pnl REAL,
+                    max_drawdown_pct REAL,
+                    entries_count INTEGER DEFAULT 0,
+                    exits_count INTEGER DEFAULT 0,
+                    stop_losses_count INTEGER DEFAULT 0,
+                    PRIMARY KEY (date, market)
+                );
+                INSERT OR IGNORE INTO daily_log_new
+                    SELECT date, market, spy_close, spy_sma200, market_filter_pass,
+                           account_equity, cash_balance, total_positions, total_units,
+                           daily_pnl, daily_pnl_pct, cumulative_pnl, max_drawdown_pct,
+                           entries_count, exits_count, stop_losses_count
+                    FROM daily_log;
+                DROP TABLE daily_log;
+                ALTER TABLE daily_log_new RENAME TO daily_log;
+            """)
+            await self.conn.commit()
+            logger.info("migration_applied", migration="daily_log_composite_pk")
+
+        # Migration: Add regime/breadth/roc columns to daily_log
+        dl_cols_cursor = await self.conn.execute("PRAGMA table_info(daily_log)")
+        dl_cols = {row[1] for row in await dl_cols_cursor.fetchall()}
+        for col, col_type in [("regime", "TEXT DEFAULT 'GREEN'"), ("breadth_pct", "REAL"), ("roc", "REAL")]:
+            if col not in dl_cols:
+                await self.conn.execute(f"ALTER TABLE daily_log ADD COLUMN {col} {col_type}")
+                await self.conn.commit()
+                logger.info("migration_applied", migration=f"add_daily_log_{col}")
+
+        # Migration: IBD Market Direction tables
+        cursor = await self.conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='ibd_market_direction'")
+        if not await cursor.fetchone():
+            await self.conn.executescript("""
+                CREATE TABLE IF NOT EXISTS ibd_market_direction (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    date TEXT NOT NULL,
+                    index_ticker TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    prior_status TEXT,
+                    distribution_count INTEGER NOT NULL DEFAULT 0,
+                    rally_day_count INTEGER NOT NULL DEFAULT 0,
+                    ftd_date TEXT,
+                    ftd_low REAL,
+                    notes TEXT,
+                    UNIQUE(date, index_ticker)
+                );
+                CREATE TABLE IF NOT EXISTS ibd_distribution_days (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    index_ticker TEXT NOT NULL,
+                    date TEXT NOT NULL,
+                    day_type TEXT NOT NULL,
+                    close_price REAL NOT NULL,
+                    price_change_pct REAL NOT NULL,
+                    volume INTEGER NOT NULL,
+                    prior_volume INTEGER NOT NULL,
+                    expired INTEGER NOT NULL DEFAULT 0,
+                    expiry_reason TEXT,
+                    expiry_date TEXT,
+                    UNIQUE(index_ticker, date)
+                );
+                CREATE INDEX IF NOT EXISTS idx_ibd_dist_active
+                    ON ibd_distribution_days(index_ticker, expired) WHERE expired = 0;
+            """)
+            await self.conn.commit()
+            logger.info("migration_applied", migration="add_ibd_market_direction_tables")

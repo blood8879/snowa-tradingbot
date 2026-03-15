@@ -86,6 +86,35 @@ MARKET_FILTER_BUFFER_PCT: float = 0.00       # No buffer (0% = exact MA boundary
 MARKET_FILTER_APPLIES_TO: str = "NEW_ENTRIES"  # Only applies to new entries
 # Existing positions managed by turtle exit rules regardless of market filter
 
+# ── Market Breadth & ROC (3-tier regime) ──
+MARKET_BREADTH_GREEN: float = 0.55   # >55% of universe above 200 SMA = healthy
+MARKET_BREADTH_RED: float = 0.35     # <35% = deteriorating
+MARKET_ROC_PERIOD: int = 125         # 125-day (≈6 month) rate of change
+MARKET_ROC_WARNING: float = -0.05    # ROC < -5% = momentum broken
+MARKET_REGIME_YELLOW_SCALE: float = 0.5  # YELLOW regime: half unit sizing
+
+
+# ============================================================
+# IBD Market Direction (Standalone Logging)
+# ============================================================
+IBD_INDEXES_US: list[str] = ["SPY", "QQQ"]
+IBD_INDEXES_KR: list[str] = ["069500", "229200"]  # KODEX200, KODEX KOSDAQ150
+IBD_DISTRIBUTION_MIN_DECLINE: float = -0.002
+IBD_DISTRIBUTION_WINDOW: int = 25
+IBD_DISTRIBUTION_RALLY_EXPIRE: float = 0.05
+IBD_STALL_MAX_GAIN: float = 0.004
+IBD_STALL_MIN_GAIN: float = 0.0
+IBD_STALL_CLOSE_RANGE_MAX: float = 0.50
+IBD_STALL_VOLUME_RATIO: float = 0.95
+IBD_STALL_MAX_COUNT: int = 2
+IBD_FTD_MIN_GAIN: float = 0.0125
+IBD_FTD_EARLIEST_DAY: int = 4
+IBD_FTD_LATEST_DAY: int = 10
+IBD_PRESSURE_THRESHOLD: int = 3
+IBD_CORRECTION_THRESHOLD: int = 5
+IBD_FTD_FRAGILE_DAYS: int = 2
+IBD_LOOKBACK_DAYS: int = 60
+
 
 # ============================================================
 # Short Selling — Disabled by Default
@@ -185,7 +214,7 @@ MINERVINI_MIN_RS_RATING_TREND: int = 70      # RS Rating ≥ 70 (preferably ≥ 
 # ============================================================
 WS_RECONNECT_DELAYS: list[int] = [1, 2, 4, 8, 16, 30, 30, 30]  # Exponential backoff (seconds)
 WS_HEARTBEAT_TIMEOUT: int = 60              # Reconnect after 60s of silence
-WS_REST_FALLBACK_INTERVAL: int = 30         # REST polling interval when WS is down (seconds)
+WS_REST_FALLBACK_INTERVAL: int = 10         # REST polling interval when WS is down (seconds)
 
 
 # ============================================================

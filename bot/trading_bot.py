@@ -30,6 +30,7 @@ from broker.kis_rest import KISRestClient
 from broker.kis_websocket import KISWebSocket
 from broker.order_executor import OrderExecutor
 from config.constants import DAILY_SCREENING_HOUR, DAILY_SCREENING_MINUTE
+from config.market_config import get_market_config, MarketConfig, get_all_markets
 from config.settings import get_settings
 from core.database import Database
 from core.events import EventBus
@@ -124,12 +125,46 @@ class TradingBot:
             rest_client=self._rest_client,
         )
 
+        # ── KR Market: 별도 IntradayMonitor + WebSocket ──
+        self._intraday_kr = IntradayMonitor(
+            db=self._db,
+            event_bus=self._event_bus,
+            rest_client=self._rest_client,
+            order_executor=self._order_executor,
+            position_mgr=self._position_mgr,
+            risk_mgr=self._risk_mgr,
+            correlation_mgr=self._correlation_mgr,
+        )
+        self._intraday_kr.set_market("KR")
+
+        self._websocket_kr = KISWebSocket(
+            auth=self._auth,
+            price_callback=self._intraday_kr.on_price_update,
+            rest_client=self._rest_client,
+        )
+
         # ── Scheduler ──
         self._scheduler = AsyncIOScheduler(timezone="Asia/Seoul")
         self._running: bool = False
         self._intraday_started: bool = False  # 레이스 컨디션 방지 가드
         self._ws_task: asyncio.Task | None = None
         self._fill_check_task: asyncio.Task | None = None
+        self._intraday_kr_started: bool = False
+        self._ws_kr_task: asyncio.Task | None = None
+        self._fill_check_kr_task: asyncio.Task | None = None
+
+    # ────────────────────────────────────────────────────────
+    # Market Toggle
+    # ────────────────────────────────────────────────────────
+
+    async def is_market_enabled(self, market_id: str) -> bool:
+        """Check if a specific market is enabled (bot_state table)."""
+        key = f"market_{market_id.lower()}_enabled"
+        value = await self._db.get_state(key)
+        if value is None:
+            # Default: US enabled, KR disabled (until Phase 2 is complete)
+            return market_id == "US"
+        return value.lower() in ("true", "1", "yes")
 
     # ────────────────────────────────────────────────────────
     # Main Entry Point
@@ -157,10 +192,17 @@ class TradingBot:
 
         # Step 2.5: 브로커 포지션 동기화 (DB ↔ 브로커 불일치 방지)
         try:
-            sync_result = await self._account_mgr.sync_positions()
-            logger.info("startup_sync_positions", **sync_result)
+            sync_result = await self._account_mgr.sync_positions(market="US")
+            logger.info("startup_sync_positions", market="US", **sync_result)
         except Exception as exc:
-            logger.warning("startup_sync_positions_failed", error=str(exc))
+            logger.warning("startup_sync_positions_failed", market="US", error=str(exc))
+
+        if await self.is_market_enabled("KR"):
+            try:
+                sync_result_kr = await self._account_mgr.sync_positions(market="KR")
+                logger.info("startup_sync_positions", market="KR", **sync_result_kr)
+            except Exception as exc:
+                logger.warning("startup_sync_positions_failed", market="KR", error=str(exc))
 
         # Step 2.6: 최초 실행 시 시작 잔고 기록
         await self._record_starting_equity()
@@ -217,6 +259,7 @@ class TradingBot:
 
         월~금만 실행 (day_of_week="mon-fri").
         """
+        # === US Market Schedule ===
         # 매일 스크리닝: KST 20:00 (pre_market 2시간 전)
         self._scheduler.add_job(
             self._run_daily_screening,
@@ -231,46 +274,104 @@ class TradingBot:
             misfire_grace_time=7200,
         )
 
-        # 장전 준비: KST 22:00 (= UTC 13:00)
+        # 장전 준비: ET 08:00 (US 장 시작 1.5시간 전)
+        # America/New_York 타임존 사용으로 DST 자동 대응
         self._scheduler.add_job(
             self._run_pre_market,
             trigger=CronTrigger(
-                hour=22,
+                hour=8,
                 minute=0,
                 day_of_week="mon-fri",
-                timezone="Asia/Seoul",
+                timezone="America/New_York",
             ),
             id="pre_market",
             name="Pre-Market Preparation",
             misfire_grace_time=7200,
         )
 
-        # 장중 모니터링 시작: KST 23:30 (= UTC 14:30)
+        # 장중 모니터링 시작: ET 09:30 (US 정규장 시작)
         self._scheduler.add_job(
             self._start_intraday,
             trigger=CronTrigger(
-                hour=23,
+                hour=9,
                 minute=30,
                 day_of_week="mon-fri",
-                timezone="Asia/Seoul",
+                timezone="America/New_York",
             ),
             id="market_open",
             name="Market Open - Start Intraday",
             misfire_grace_time=7200,
         )
 
-        # 장후 정리: KST 06:30 (= UTC 21:30, 다음 날)
+        # 장후 정리: ET 16:30 (US 정규장 종료 30분 후)
         self._scheduler.add_job(
             self._run_post_market,
             trigger=CronTrigger(
-                hour=6,
+                hour=16,
                 minute=30,
-                day_of_week="tue-sat",
-                timezone="Asia/Seoul",
+                day_of_week="mon-fri",
+                timezone="America/New_York",
             ),
             id="post_market",
             name="Post-Market Cleanup",
             misfire_grace_time=7200,
+        )
+
+        # === KR Market Schedule ===
+        # 매일 스크리닝: KST 07:00
+        self._scheduler.add_job(
+            self._run_daily_screening_kr,
+            trigger=CronTrigger(
+                hour=7,
+                minute=0,
+                day_of_week="mon-fri",
+                timezone="Asia/Seoul",
+            ),
+            id="kr_daily_screening",
+            name="KR Daily CANSLIM Screening",
+            misfire_grace_time=3600,
+        )
+
+        # 장전 준비: KST 08:00
+        self._scheduler.add_job(
+            self._run_pre_market_kr,
+            trigger=CronTrigger(
+                hour=8,
+                minute=0,
+                day_of_week="mon-fri",
+                timezone="Asia/Seoul",
+            ),
+            id="kr_pre_market",
+            name="KR Pre-Market Preparation",
+            misfire_grace_time=3600,
+        )
+
+        # 장중 모니터링 시작: KST 09:00
+        self._scheduler.add_job(
+            self._start_intraday_kr,
+            trigger=CronTrigger(
+                hour=9,
+                minute=0,
+                day_of_week="mon-fri",
+                timezone="Asia/Seoul",
+            ),
+            id="kr_market_open",
+            name="KR Market Open - Start Intraday",
+            misfire_grace_time=3600,
+        )
+
+        # 장후 정리: KST 16:00
+        self._scheduler.add_job(
+            self._run_post_market_kr,
+            trigger=CronTrigger(
+                hour=16,
+                minute=0,
+                day_of_week="mon-fri",
+                timezone="Asia/Seoul",
+            ),
+            id="kr_post_market",
+            name="KR Post-Market Cleanup",
+            misfire_grace_time=3600,
         )
 
         logger.info(
@@ -323,29 +424,34 @@ class TradingBot:
         If the bot starts inside this window, run pre_market + start_intraday
         immediately so we don't sit idle until next scheduled trigger.
         """
+        # === US Market Catch-Up ===
         now_et = datetime.now(ZoneInfo("America/New_York"))
         market_open = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
         market_close = now_et.replace(hour=16, minute=0, second=0, microsecond=0)
 
         weekday = now_et.weekday()  # 0=Mon ... 4=Fri
-        if weekday > 4:
-            logger.info("catchup_skip_weekend", weekday=weekday)
-            return
-
-        if not (market_open <= now_et <= market_close):
-            logger.info(
-                "catchup_skip_outside_hours",
+        if weekday <= 4 and market_open <= now_et <= market_close:
+            logger.warning(
+                "catchup_mid_session_restart_detected",
                 now_et=now_et.isoformat(),
             )
-            return
+            await self._run_pre_market()
+            await self._start_intraday()
 
-        logger.warning(
-            "catchup_mid_session_restart_detected",
-            now_et=now_et.isoformat(),
-        )
+        # === KR Market Catch-Up ===
+        if await self.is_market_enabled("KR"):
+            now_kst = datetime.now(ZoneInfo("Asia/Seoul"))
+            kr_open = now_kst.replace(hour=9, minute=0, second=0, microsecond=0)
+            kr_close = now_kst.replace(hour=15, minute=30, second=0, microsecond=0)
+            weekday_kst = now_kst.weekday()
 
-        await self._run_pre_market()
-        await self._start_intraday()
+            if weekday_kst <= 4 and kr_open <= now_kst <= kr_close:
+                logger.warning(
+                    "catchup_kr_mid_session_restart_detected",
+                    now_kst=now_kst.isoformat(),
+                )
+                await self._run_pre_market_kr()
+                await self._start_intraday_kr()
 
     # ────────────────────────────────────────────────────────
     # Scheduled Tasks
@@ -451,10 +557,13 @@ class TradingBot:
                 signals = result.get("signals", [])
                 self._intraday.precomputed_signals = {s.ticker: s for s in signals}
                 self._intraday.market_filter_pass = result.get("market_filter_pass", False)
+                self._intraday.market_regime_scale = result.get("market_regime_scale", 1.0)
 
                 logger.info(
                     "pre_market_complete",
                     market_filter=result.get("market_filter_pass"),
+                    regime=result.get("market_regime"),
+                    regime_scale=result.get("market_regime_scale"),
                     watchlist=result.get("watchlist_count", 0),
                     positions=result.get("position_count", 0),
                     signals=len(signals),
@@ -509,7 +618,7 @@ class TradingBot:
 
             open_positions = await self._position_mgr.get_open_positions()
             for pos in open_positions:
-                if pos.ticker not in tickers:
+                if pos.market == "US" and pos.ticker not in tickers:
                     tickers.append(pos.ticker)
 
             if not tickers:
@@ -564,9 +673,14 @@ class TradingBot:
                 await asyncio.sleep(FILL_CHECK_INTERVAL)
                 check_count += 1
                 try:
-                    filled = await self._order_executor.check_order_fills()
+                    filled = await asyncio.wait_for(
+                        self._order_executor.check_order_fills(),
+                        timeout=60,
+                    )
                     if filled:
                         logger.info("fill_check_matched", count=len(filled))
+                except asyncio.TimeoutError:
+                    logger.error("fill_check_timeout", msg="check_order_fills 60초 초과 → skip")
                 except Exception:
                     logger.exception("fill_check_error")
 
@@ -587,7 +701,7 @@ class TradingBot:
             pass
 
     async def _stop_intraday(self) -> None:
-        """장중 모니터링 중지.
+        """US 장중 모니터링 중지.
 
         WebSocket 연결을 끊고 인트라데이 모니터를 정지한다.
         """
@@ -640,6 +754,246 @@ class TradingBot:
             logger.error("post_market_failed", error=str(e), exc_info=True)
 
     # ────────────────────────────────────────────────────────
+    # KR Market Tasks
+    # ────────────────────────────────────────────────────────
+
+    async def _run_daily_screening_kr(self) -> None:
+        """한국 CANSLIM 스크리닝 — KST 07:00."""
+        if not await self.is_market_enabled("KR"):
+            logger.info("kr_daily_screening_skipped_disabled")
+            return
+        logger.info("kr_daily_screening_start")
+
+        try:
+            result = await self._daily_screening.run(market="KR")
+            logger.info(
+                "kr_daily_screening_complete",
+                universe=result.get("universe_count", 0),
+                watchlist=result.get("watchlist_count", 0),
+                elapsed=result.get("elapsed", 0),
+            )
+        except Exception as e:
+            logger.error("kr_daily_screening_failed", error=str(e), exc_info=True)
+
+    async def _run_pre_market_kr(self) -> None:
+        """한국 장전 준비 — KST 08:00."""
+        if not await self.is_market_enabled("KR"):
+            logger.info("kr_pre_market_skipped_disabled")
+            return
+        logger.info("kr_pre_market_start")
+
+        try:
+            result = await self._pre_market.run(market="KR")
+
+            # 시그널을 KR IntradayMonitor에 주입
+            signals = result.get("signals", [])
+            self._intraday_kr.precomputed_signals = {s.ticker: s for s in signals}
+            self._intraday_kr.market_filter_pass = result.get("market_filter_pass", False)
+            self._intraday_kr.market_regime_scale = result.get("market_regime_scale", 1.0)
+
+            logger.info(
+                "kr_pre_market_complete",
+                market_filter=result.get("market_filter_pass"),
+                regime=result.get("market_regime"),
+                regime_scale=result.get("market_regime_scale"),
+                watchlist=result.get("watchlist_count", 0),
+                positions=result.get("position_count", 0),
+                signals=len(signals),
+            )
+        except Exception as e:
+            logger.error("kr_pre_market_failed", error=str(e), exc_info=True)
+
+    async def _start_intraday_kr(self) -> None:
+        """한국 장중 모니터링 시작 — KST 09:00."""
+        if not await self.is_market_enabled("KR"):
+            logger.info("kr_intraday_skipped_disabled")
+            return
+
+        if self._intraday_kr_started:
+            logger.warning("kr_intraday_already_started_skipping")
+            return
+        self._intraday_kr_started = True
+
+        logger.info("kr_intraday_start")
+
+        try:
+            # 시그널이 비어있으면 pre_market_kr 먼저 실행
+            if not self._intraday_kr.precomputed_signals:
+                logger.warning(
+                    "kr_intraday_signals_empty_running_pre_market",
+                    msg="precomputed_signals 비어있음 → pre_market_kr 실행",
+                )
+                await self._run_pre_market_kr()
+
+            await self._intraday_kr.start()
+
+            # Gap-down 즉시 손절: 전일 종가(pykrx)가 손절가 이하인 포지션
+            # REST polling이 잘못된 가격을 반환할 수 있으므로, 실제 종가 기반 판단
+            await self._execute_gap_down_stops(self._intraday_kr, "KR")
+
+            # KR watchlist + open positions에서 ticker 수집
+            tickers = list(self._intraday_kr.precomputed_signals.keys())
+
+            open_positions = await self._position_mgr.get_open_positions()
+            for pos in open_positions:
+                if pos.market == "KR" and pos.ticker not in tickers:
+                    tickers.append(pos.ticker)
+
+            if not tickers:
+                logger.critical(
+                    "kr_intraday_no_tickers_available",
+                    precomputed_signals=len(self._intraday_kr.precomputed_signals),
+                    market_filter=self._intraday_kr.market_filter_pass,
+                )
+                return
+
+            ticker_exchanges = await self._build_ticker_exchange_map_kr(tickers)
+
+            self._ws_kr_task = asyncio.create_task(
+                self._websocket_kr.start(ticker_exchanges, market="KR"),
+                name="websocket_kr_listener",
+            )
+            self._fill_check_kr_task = asyncio.create_task(
+                self._fill_check_loop_kr(),
+                name="fill_check_loop_kr",
+            )
+            await self._db.set_state("ws_kr_status", "CONNECTED")
+
+            logger.info("kr_intraday_started", tickers_count=len(tickers))
+
+        except Exception as e:
+            logger.error("kr_intraday_start_failed", error=str(e), exc_info=True)
+
+    async def _execute_gap_down_stops(self, monitor: IntradayMonitor, market: str) -> None:
+        """Gap-down 포지션 즉시 손절.
+
+        pre_market에서 전일 종가 < 손절가로 감지된 포지션을
+        장 시작 시 REST polling 이전에 즉시 손절 처리한다.
+        KIS Paper API가 잘못된 가격을 반환할 수 있으므로,
+        pykrx/yfinance 실제 종가 기반으로 판단한다.
+        """
+        from data.price_cache import PriceCache
+
+        price_cache = PriceCache(self._db)
+        open_positions = await self._position_mgr.get_open_positions()
+
+        for pos in open_positions:
+            if pos.market != market:
+                continue
+            latest_close = await price_cache.get_latest_close(pos.ticker)
+            if latest_close is None:
+                continue
+            if latest_close < pos.current_stop_price:
+                logger.warning(
+                    "gap_down_immediate_stop",
+                    ticker=pos.ticker,
+                    latest_close=latest_close,
+                    stop_price=pos.current_stop_price,
+                    market=market,
+                )
+                await monitor._execute_stop_loss(
+                    pos.ticker, latest_close, pos, time.time()
+                )
+
+    async def _run_post_market_kr(self) -> None:
+        """한국 장후 정리 — KST 16:00."""
+        if not await self.is_market_enabled("KR"):
+            logger.info("kr_post_market_skipped_disabled")
+            return
+        logger.info("kr_post_market_start")
+
+        try:
+            # 장중 모니터링 중지
+            await self._stop_intraday_kr()
+
+            result = await self._post_market.run(market="KR")
+            logger.info(
+                "kr_post_market_complete",
+                sync=result.get("sync_result"),
+                cancelled=result.get("cancelled_orders", 0),
+            )
+        except Exception as e:
+            logger.error("kr_post_market_failed", error=str(e), exc_info=True)
+
+    async def _stop_intraday_kr(self) -> None:
+        """KR 장중 모니터링 중지."""
+        logger.info("kr_intraday_stopping")
+
+        try:
+            await self._db.set_state("ws_kr_status", "DISCONNECTED")
+            await self._websocket_kr.stop()
+
+            for task_ref in (self._ws_kr_task, self._fill_check_kr_task):
+                if task_ref is not None and not task_ref.done():
+                    task_ref.cancel()
+                    try:
+                        await task_ref
+                    except asyncio.CancelledError:
+                        pass
+            self._ws_kr_task = None
+            self._fill_check_kr_task = None
+
+            await self._intraday_kr.stop()
+            self._intraday_kr_started = False
+            logger.info("kr_intraday_stopped")
+
+        except Exception as e:
+            self._intraday_kr_started = False
+            logger.error("kr_intraday_stop_failed", error=str(e), exc_info=True)
+
+    async def _build_ticker_exchange_map_kr(self, tickers: list[str]) -> dict[str, str]:
+        """KR 종목의 exchange 매핑 (기본값: KOSPI)."""
+        result: dict[str, str] = {}
+        for ticker in tickers:
+            try:
+                cursor = await self._db.conn.execute(
+                    "SELECT exchange FROM watchlist WHERE ticker = ?",
+                    (ticker,),
+                )
+                row = await cursor.fetchone()
+                result[ticker] = row[0] if row and row[0] else "KOSPI"
+            except Exception:
+                result[ticker] = "KOSPI"
+        return result
+
+    async def _fill_check_loop_kr(self) -> None:
+        """KR 체결 확인 루프."""
+        FILL_CHECK_INTERVAL = 30
+        HEARTBEAT_INTERVAL = 300
+        last_heartbeat = 0.0
+        check_count = 0
+        try:
+            while True:
+                await asyncio.sleep(FILL_CHECK_INTERVAL)
+                check_count += 1
+                try:
+                    filled = await asyncio.wait_for(
+                        self._order_executor.check_order_fills(),
+                        timeout=60,
+                    )
+                    if filled:
+                        logger.info("kr_fill_check_matched", count=len(filled))
+                except asyncio.TimeoutError:
+                    logger.error("kr_fill_check_timeout", msg="check_order_fills 60초 초과 → skip")
+                except Exception:
+                    logger.exception("kr_fill_check_error")
+
+                now = time.time()
+                if now - last_heartbeat >= HEARTBEAT_INTERVAL:
+                    last_heartbeat = now
+                    pending = await self._db.conn.execute(
+                        "SELECT COUNT(*) FROM orders WHERE status IN ('SUBMITTED','PARTIAL') AND market = 'KR'"
+                    )
+                    pending_count = (await pending.fetchone())[0]
+                    logger.info(
+                        "kr_fill_check_heartbeat",
+                        checks_done=check_count,
+                        pending_orders=pending_count,
+                    )
+        except asyncio.CancelledError:
+            pass
+
+    # ────────────────────────────────────────────────────────
     # Kill Switch
     # ────────────────────────────────────────────────────────
 
@@ -674,6 +1028,7 @@ class TradingBot:
 
         # 장중 모니터링 중지
         await self._stop_intraday()
+        await self._stop_intraday_kr()
 
         # DB 종료
         await self._db.close()
