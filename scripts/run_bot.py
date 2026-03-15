@@ -10,9 +10,15 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+import faulthandler
+import signal
 import sys
 
 import structlog
+
+# SIGUSR2로 Python 스택 트레이스 덤프 활성화
+faulthandler.enable()
+faulthandler.register(signal.SIGUSR2)
 
 from config.logging_config import setup_logging
 from config.settings import get_settings

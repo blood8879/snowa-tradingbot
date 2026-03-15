@@ -64,6 +64,7 @@ class RiskManager:
         shares: int,
         entry_price: float,
         account_equity: float,
+        market: str | None = None,
     ) -> dict:
         """Full risk check for a brand-new position entry.
 
@@ -83,7 +84,7 @@ class RiskManager:
                 - ``details`` (dict): Breakdown of limit usage.
         """
         violations: list[str] = []
-        current_units = await self._count_units_by_group()
+        current_units = await self._count_units_by_group(market=market)
 
         # Check if a position is already open for this ticker
         existing = await self._pm.get_position(ticker)
@@ -145,6 +146,7 @@ class RiskManager:
         shares: int,
         entry_price: float,
         account_equity: float,
+        market: str | None = None,
     ) -> dict:
         """Check whether a pyramid unit addition is allowed.
 
@@ -164,7 +166,7 @@ class RiskManager:
                 - ``details`` (dict): Breakdown of limit usage.
         """
         violations: list[str] = []
-        current_units = await self._count_units_by_group()
+        current_units = await self._count_units_by_group(market=market)
 
         # Verify the position actually exists
         existing = await self._pm.get_position(ticker)
@@ -286,14 +288,19 @@ class RiskManager:
 
     # ── Internal Helpers ─────────────────────────────────────
 
-    async def _count_units_by_group(self) -> dict[str, int]:
+    async def _count_units_by_group(
+        self, market: str | None = None,
+    ) -> dict[str, int]:
         """Build a mapping of ticker → unit count from open positions.
 
-        Queries all open positions via PositionManager and counts
-        the number of units loaded for each.
+        Args:
+            market: If provided, only count positions for this market
+                (e.g. 'US' or 'KR'). None counts all markets.
 
         Returns:
             Dict mapping ticker symbol to its current unit count.
         """
         positions = await self._pm.get_open_positions()
+        if market:
+            positions = [p for p in positions if p.market == market]
         return {p.ticker: p.unit_count for p in positions}

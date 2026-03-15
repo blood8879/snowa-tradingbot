@@ -51,6 +51,7 @@ class PositionManager:
         stop_price: float,
         sector: str | None = None,
         industry: str | None = None,
+        market: str = "US",
     ) -> int:
         """Create a new position with its first entry unit.
 
@@ -65,6 +66,7 @@ class PositionManager:
             stop_price: Initial stop-loss price.
             sector: GICS sector (for loosely-correlated limit).
             industry: IBD industry (for closely-correlated limit).
+            market: Market identifier ("US" or "KR").
 
         Returns:
             The auto-generated position id.
@@ -80,14 +82,14 @@ class PositionManager:
                 (ticker, system, status,
                  total_shares, total_cost, avg_entry_price,
                  current_stop_price, n_at_entry,
-                 sector, industry, opened_at)
-            VALUES (?, ?, 'OPEN', ?, ?, ?, ?, ?, ?, ?, ?)
+                 sector, industry, opened_at, market)
+            VALUES (?, ?, 'OPEN', ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 ticker, system,
                 shares, total_cost, entry_price,
                 stop_price, n_value,
-                sector, industry, now,
+                sector, industry, now, market,
             ),
         )
         position_id: int = cursor.lastrowid  # type: ignore[assignment]
@@ -144,6 +146,25 @@ class PositionManager:
             raise ValueError(f"Position {position_id} not found")
 
         total_shares, total_cost, ticker = row
+
+        # 유닛 기반 total_cost 재검증 (sync_positions가 브로커 avg_price로
+        # 덮어쓴 경우 positions.total_cost가 부정확할 수 있음)
+        unit_cursor = await conn.execute(
+            "SELECT SUM(shares * entry_price) FROM units WHERE position_id = ?",
+            (position_id,),
+        )
+        unit_row = await unit_cursor.fetchone()
+        unit_cost = unit_row[0] if unit_row and unit_row[0] else 0.0
+        if unit_cost > 0 and abs(unit_cost - total_cost) > 1.0:
+            logger.warning(
+                "close_position_cost_mismatch_corrected",
+                position_id=position_id,
+                ticker=ticker,
+                positions_total_cost=total_cost,
+                units_total_cost=unit_cost,
+            )
+            total_cost = unit_cost
+
         realized_pnl = (exit_price * total_shares) - total_cost
 
         await conn.execute(
@@ -353,32 +374,9 @@ class PositionManager:
         row = await cursor.fetchone()
         unit_number = (row[0] if row else 0) + 1
 
-        # Fetch current position aggregates
-        cursor = await conn.execute(
-            "SELECT total_shares, total_cost FROM positions WHERE id = ?",
-            (position_id,),
-        )
-        pos_row = await cursor.fetchone()
-        if pos_row is None:
-            raise ValueError(f"Position {position_id} not found")
-
-        old_shares, old_cost = pos_row
-        new_total_shares = old_shares + shares
-        new_total_cost = old_cost + (shares * entry_price)
-        new_avg_entry = new_total_cost / new_total_shares
-
-        # Update position aggregates
-        await conn.execute(
-            """
-            UPDATE positions
-            SET total_shares = ?,
-                total_cost = ?,
-                avg_entry_price = ?,
-                current_stop_price = ?
-            WHERE id = ?
-            """,
-            (new_total_shares, new_total_cost, new_avg_entry, stop_price, position_id),
-        )
+        # Insert the new unit first, then recalculate aggregates from all units
+        # (sync_positions가 먼저 position aggregates를 업데이트했을 수 있으므로
+        #  incremental 방식 대신 units 테이블 기반 재계산으로 중복 방지)
 
         # Insert the new unit
         cursor = await conn.execute(
@@ -393,6 +391,29 @@ class PositionManager:
             (position_id, unit_number, entry_price, shares, stop_price, stop_price, now),
         )
         unit_id: int = cursor.lastrowid  # type: ignore[assignment]
+
+        # Recalculate position aggregates from all units
+        cursor = await conn.execute(
+            "SELECT SUM(shares), SUM(shares * entry_price) FROM units WHERE position_id = ?",
+            (position_id,),
+        )
+        agg_row = await cursor.fetchone()
+        new_total_shares = agg_row[0] or 0
+        new_total_cost = agg_row[1] or 0.0
+        new_avg_entry = new_total_cost / new_total_shares if new_total_shares > 0 else 0.0
+
+        # Update position aggregates
+        await conn.execute(
+            """
+            UPDATE positions
+            SET total_shares = ?,
+                total_cost = ?,
+                avg_entry_price = ?,
+                current_stop_price = ?
+            WHERE id = ?
+            """,
+            (new_total_shares, new_total_cost, new_avg_entry, stop_price, position_id),
+        )
         await conn.commit()
 
         logger.info(
@@ -575,7 +596,8 @@ class PositionManager:
             total_shares, total_cost, avg_entry_price,
             current_stop_price, n_at_entry,
             sector, industry,
-            opened_at, closed_at, close_reason, realized_pnl
+            opened_at, closed_at, close_reason, realized_pnl,
+            market
         """
         return Position(
             id=row[0],
@@ -593,6 +615,7 @@ class PositionManager:
             closed_at=row[12],
             close_reason=CloseReason(row[13]) if row[13] else None,
             realized_pnl=row[14],
+            market=row[15] if len(row) > 15 else "US",
         )
 
     @staticmethod

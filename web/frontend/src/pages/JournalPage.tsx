@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useMemo } from 'react';
 import {
   PieChart,
   Pie,
@@ -13,6 +13,8 @@ import { Badge } from '@/components/ui/Badge';
 import { PnlText } from '@/components/ui/PnlText';
 import { LoadingSpinner } from '@/components/ui/LoadingSpinner';
 import { useJournal } from '@/hooks/useJournal';
+import { useMarket } from '@/hooks/useMarket';
+import { formatPrice, formatCurrency, formatPnlValue, currencySymbol } from '@/lib/format';
 import type { Column } from '@/components/ui/DataTable';
 import type { BadgeVariant } from '@/components/ui/Badge';
 import type { JournalTrade } from '@/types/api';
@@ -42,75 +44,93 @@ function closeReasonVariant(reason: string): BadgeVariant {
 
 const PIE_COLORS = ['#10B981', '#EF4444'];
 
-const journalColumns: Column<JournalTrade>[] = [
-  {
-    key: 'ticker',
-    header: '종목',
-    render: (row) => <span className="font-medium text-slate-100">{row.ticker}</span>,
-  },
-  {
-    key: 'system',
-    header: '시스템',
-    render: (row) => (
-      <Badge variant={row.system.toLowerCase() === 's1' ? 's1' : 's2'}>
-        {row.system}
-      </Badge>
-    ),
-  },
-  {
-    key: 'opened_at',
-    header: '진입일',
-    render: (row) => (
-      <span className="text-slate-300 tabular-nums">{formatDate(row.opened_at)}</span>
-    ),
-  },
-  {
-    key: 'closed_at',
-    header: '청산일',
-    render: (row) => (
-      <span className="text-slate-300 tabular-nums">{formatDate(row.closed_at)}</span>
-    ),
-  },
-  {
-    key: 'close_reason',
-    header: '청산사유',
-    render: (row) => (
-      <Badge variant={closeReasonVariant(row.close_reason)}>
-        {row.close_reason}
-      </Badge>
-    ),
-  },
-  {
-    key: 'avg_entry_price',
-    header: '평균단가',
-    render: (row) => (
-      <span className="text-slate-300 tabular-nums">${row.avg_entry_price.toFixed(2)}</span>
-    ),
-  },
-  {
-    key: 'stop_price',
-    header: '스톱가',
-    render: (row) => (
-      <span className="text-slate-300 tabular-nums">${row.stop_price.toFixed(2)}</span>
-    ),
-  },
-  {
-    key: 'total_shares',
-    header: '수량',
-    render: (row) => (
-      <span className="text-slate-300 tabular-nums">{row.total_shares.toLocaleString()}</span>
-    ),
-  },
-  {
-    key: 'realized_pnl',
-    header: '손익',
-    render: (row) => <PnlText value={row.realized_pnl} />,
-  },
-];
+function getJournalColumns(market: string): Column<JournalTrade>[] {
+  return [
+    {
+      key: 'ticker',
+      header: '종목',
+      render: (row) => (
+        <span className="font-medium text-slate-100">
+          {row.ticker}
+          {row.name && (
+            <span className="ml-1.5 text-xs font-normal text-slate-400">{row.name}</span>
+          )}
+        </span>
+      ),
+    },
+    {
+      key: 'system',
+      header: '시스템',
+      render: (row) => (
+        <Badge variant={row.system.toLowerCase() === 's1' ? 's1' : 's2'}>
+          {row.system}
+        </Badge>
+      ),
+    },
+    {
+      key: 'opened_at',
+      header: '진입일',
+      render: (row) => (
+        <span className="text-slate-300 tabular-nums">{formatDate(row.opened_at)}</span>
+      ),
+    },
+    {
+      key: 'closed_at',
+      header: '청산일',
+      render: (row) => (
+        <span className="text-slate-300 tabular-nums">{formatDate(row.closed_at)}</span>
+      ),
+    },
+    {
+      key: 'close_reason',
+      header: '청산사유',
+      render: (row) => (
+        <Badge variant={closeReasonVariant(row.close_reason)}>
+          {row.close_reason}
+        </Badge>
+      ),
+    },
+    {
+      key: 'avg_entry_price',
+      header: '평균단가',
+      render: (row) => (
+        <span className="text-slate-300 tabular-nums">{formatPrice(row.avg_entry_price, market)}</span>
+      ),
+    },
+    {
+      key: 'stop_price',
+      header: '손절가',
+      render: (row) => (
+        <span className="text-slate-300 tabular-nums">{formatPrice(row.stop_price, market)}</span>
+      ),
+    },
+    {
+      key: 'exit_price',
+      header: '체결가',
+      render: (row) => (
+        <span className="text-slate-300 tabular-nums">{formatPrice(row.exit_price, market)}</span>
+      ),
+    },
+    {
+      key: 'total_shares',
+      header: '수량',
+      render: (row) => (
+        <span className="text-slate-300 tabular-nums">{row.total_shares.toLocaleString()}</span>
+      ),
+    },
+    {
+      key: 'realized_pnl',
+      header: '손익',
+      render: (row) => <PnlText value={row.realized_pnl} prefix={currencySymbol(market)} />,
+    },
+  ];
+}
 
 export function JournalPage() {
+  const { market } = useMarket();
   const [selectedMonth, setSelectedMonth] = useState(currentMonth);
-  const { data, isLoading, error } = useJournal(selectedMonth);
+  const { data, isLoading, error } = useJournal(selectedMonth, market);
+  const journalCols = useMemo(() => getJournalColumns(market), [market]);
 
   if (isLoading) {
     return <LoadingSpinner />;
@@ -135,7 +155,7 @@ export function JournalPage() {
     : [];
 
   const monthlyPnlStr = stats
-    ? `${stats.monthly_pnl >= 0 ? '+' : ''}$${stats.monthly_pnl.toLocaleString()}`
+    ? formatPnlValue(stats.monthly_pnl, market)
     : '—';
 
   return (
@@ -168,11 +188,11 @@ export function JournalPage() {
         />
         <StatCard
           label="평균 수익"
-          value={stats ? `$${stats.avg_win.toFixed(2)}` : '—'}
+          value={stats ? `${currencySymbol(market)}${stats.avg_win.toFixed(2)}` : '—'}
         />
         <StatCard
           label="평균 손실"
-          value={stats ? `$${stats.avg_loss.toFixed(2)}` : '—'}
+          value={stats ? `${currencySymbol(market)}${stats.avg_loss.toFixed(2)}` : '—'}
         />
         <StatCard
           label="손익비"
@@ -232,13 +252,13 @@ export function JournalPage() {
             <div className="flex justify-between items-center">
               <span className="text-sm text-slate-400">최소 자산</span>
               <span className="text-lg font-semibold text-slate-100 tabular-nums">
-                ${stats?.min_equity.toLocaleString() ?? '—'}
+                {stats ? formatCurrency(stats.min_equity, market) : '—'}
               </span>
             </div>
             <div className="flex justify-between items-center">
               <span className="text-sm text-slate-400">최대 자산</span>
               <span className="text-lg font-semibold text-slate-100 tabular-nums">
-                ${stats?.max_equity.toLocaleString() ?? '—'}
+                {stats ? formatCurrency(stats.max_equity, market) : '—'}
               </span>
             </div>
             {/* Visual equity range bar */}
@@ -272,7 +292,7 @@ export function JournalPage() {
       <div className="bg-panel rounded-xl p-4 border border-slate-700/50">
         <h3 className="text-sm font-medium text-slate-400 mb-4">매매 내역</h3>
         <DataTable<JournalTrade>
-          columns={journalColumns}
+          columns={journalCols}
           data={trades}
           rowKey={(row) => `${row.ticker}-${row.opened_at}`}
           emptyMessage="이 달의 매매 기록이 없습니다"

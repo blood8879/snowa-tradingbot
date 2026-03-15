@@ -306,10 +306,13 @@ class KISAuth:
             Headers dict ready to use with aiohttp
         """
         return {
-            "content-type": "application/json; charset=utf-8",
+            "Content-Type": "application/json",
+            "Accept": "text/plain",
+            "charset": "UTF-8",
             "authorization": f"Bearer {self.access_token}",
             "appkey": self._settings.active_app_key,
             "appsecret": self._settings.active_app_secret,
             "tr_id": tr_id,
+            "tr_cont": "",
             "custtype": "P",  # Personal account
         }

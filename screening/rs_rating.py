@@ -41,13 +41,17 @@ class RSRatingCalculator:
 
     # ── Single Ticker ────────────────────────────────────────
 
-    async def calculate_single(self, ticker: str) -> float | None:
+    async def calculate_single(self, ticker: str, *, market: str = "US") -> float | None:
         """
         Calculate raw RS score for a single ticker.
 
         Returns the weighted return value (NOT a percentile rank).
         The percentile conversion requires the full universe — see
         :meth:`calculate_universe`.
+
+        Args:
+            ticker: Stock symbol.
+            market: Market identifier ("US" or "KR") for logging context.
 
         Returns:
             Raw RS score as a float, or None if insufficient data.
@@ -73,9 +77,12 @@ class RSRatingCalculator:
 
     # ── Full Universe ────────────────────────────────────────
 
-    async def calculate_universe(self, tickers: list[str]) -> dict[str, int]:
+    async def calculate_universe(self, tickers: list[str], *, market: str = "US") -> dict[str, int]:
         """
         Calculate RS Rating (1-99) for every ticker in the universe.
+
+        For KR market, RS ratings are calculated against KR universe only.
+        For US market, RS ratings are calculated against US universe only.
 
         Steps:
             1. Compute raw RS for each ticker via :meth:`calculate_single`.
@@ -83,6 +90,7 @@ class RSRatingCalculator:
 
         Args:
             tickers: Full list of ticker symbols in the stock universe.
+            market: Market identifier ("US" or "KR") for separate universe calculation.
 
         Returns:
             Dict mapping ticker → RS Rating (1-99 int).
@@ -93,7 +101,7 @@ class RSRatingCalculator:
         # Step 1: compute raw RS scores
         raw_scores: dict[str, float] = {}
         for i, ticker in enumerate(tickers):
-            score = await self.calculate_single(ticker)
+            score = await self.calculate_single(ticker, market=market)
             if score is not None:
                 raw_scores[ticker] = score
 
@@ -103,6 +111,7 @@ class RSRatingCalculator:
                     processed=i + 1,
                     total=len(tickers),
                     valid=len(raw_scores),
+                    market=market,
                 )
 
         if not raw_scores:
@@ -126,6 +135,7 @@ class RSRatingCalculator:
             rated=len(ratings),
             skipped=len(tickers) - len(ratings),
             elapsed_seconds=round(elapsed, 2),
+            market=market,
         )
 
         return ratings

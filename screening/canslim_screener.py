@@ -115,6 +115,8 @@ class CANSLIMScreener:
         ticker: str,
         rs_rating: int | None = None,
         core_only: bool = False,
+        *,
+        market: str = "US",
     ) -> CANSLIMResult:
         """Run CANSLIM filters for a single ticker.
 
@@ -123,23 +125,30 @@ class CANSLIMScreener:
             rs_rating: Pre-computed RS Rating (1–99). If None the L filter fails.
             core_only: When True, skip non-gating filters (N, I, Additional)
                        to avoid slow yfinance API calls during bulk screening.
+            market: Market identifier ("US" or "KR") for threshold adjustments.
 
         Returns:
             A ``CANSLIMResult`` containing every filter's outcome.
         """
-        c = await self.check_c_filter(ticker)
-        a = await self.check_a_filter(ticker)
-        s = await self.check_s_filter(ticker)
-        l = await self.check_l_filter(ticker, rs_rating)
+        s = await self.check_s_filter(ticker, market=market)
+        l = await self.check_l_filter(ticker, rs_rating, market=market)
+
+        # Short-circuit: for KR, skip expensive DART API lookups if S or L already failed
+        if market == "KR" and not (s.passed and l.passed):
+            c = ScreenResult(passed=False, detail="Skipped (S or L failed)")
+            a = ScreenResult(passed=False, detail="Skipped (S or L failed)")
+        else:
+            c = await self.check_c_filter(ticker, market=market)
+            a = await self.check_a_filter(ticker, market=market)
 
         if core_only:
             n = ScreenResult(passed=False, detail="Skipped (core_only)")
             i = ScreenResult(passed=False, detail="Skipped (core_only)")
             additional = ScreenResult(passed=True, detail="Skipped (core_only)")
         else:
-            n = await self.check_n_filter(ticker)
-            i = await self.check_i_filter(ticker)
-            additional = await self.check_additional(ticker)
+            n = await self.check_n_filter(ticker, market=market)
+            i = await self.check_i_filter(ticker, market=market)
+            additional = await self.check_additional(ticker, market=market)
 
         result = CANSLIMResult(
             ticker=ticker,
@@ -155,6 +164,7 @@ class CANSLIMScreener:
         logger.debug(
             "canslim_screen_complete",
             ticker=ticker,
+            market=market,
             passed_count=result.passed_count,
             passed_all=result.passed_all,
         )
@@ -165,6 +175,8 @@ class CANSLIMScreener:
         tickers: list[str],
         rs_ratings: dict[str, int] | None = None,
         core_only: bool = False,
+        *,
+        market: str = "US",
     ) -> list[CANSLIMResult]:
         """Screen all tickers and return results sorted by *passed_count* descending.
 
@@ -172,6 +184,7 @@ class CANSLIMScreener:
             tickers: List of ticker symbols to screen.
             rs_ratings: Optional mapping of ticker → RS Rating.
             core_only: Skip non-gating filters for performance.
+            market: Market identifier ("US" or "KR") for threshold adjustments.
 
         Returns:
             List of ``CANSLIMResult``, best candidates first.
@@ -186,7 +199,7 @@ class CANSLIMScreener:
             try:
                 rs = rs_ratings.get(ticker)
                 result = await self.screen_ticker(
-                    ticker, rs_rating=rs, core_only=core_only,
+                    ticker, rs_rating=rs, core_only=core_only, market=market,
                 )
                 results.append(result)
             except Exception:
@@ -195,6 +208,7 @@ class CANSLIMScreener:
             if idx % 200 == 0:
                 logger.info(
                     "screen_universe_progress",
+                    market=market,
                     completed=idx,
                     total=total,
                     passed_so_far=sum(1 for r in results if r.passed_all),
@@ -205,6 +219,7 @@ class CANSLIMScreener:
 
         logger.info(
             "screen_universe_complete",
+            market=market,
             total_screened=len(results),
             passed_all=sum(1 for r in results if r.passed_all),
         )
@@ -212,11 +227,13 @@ class CANSLIMScreener:
 
     # ── Individual Filters ───────────────────────────────────
 
-    async def check_c_filter(self, ticker: str) -> ScreenResult:
+    async def check_c_filter(self, ticker: str, *, market: str = "US") -> ScreenResult:
         """**C = Current Quarterly EPS** — YoY growth ≥ 25%.
 
         Compares the most recent quarter's EPS against the same quarter
         one year prior.  Requires at least 5 quarters of data.
+
+        Uses DART OpenAPI data for KR market (net income as EPS proxy).
         """
         try:
             eps_data = await self._fundamentals.get_quarterly_eps(ticker, 8)
@@ -227,7 +244,39 @@ class CANSLIMScreener:
                 detail="Failed to fetch quarterly EPS data",
             )
 
+        # For KR with DART data, we only get 2 quarters (current + YoY).
+        # Use those 2 for direct YoY comparison instead of requiring 5.
+        if market == "KR" and len(eps_data) == 2:
+            current_eps = eps_data[0][1]
+            year_ago_eps = eps_data[1][1]
+
+            if year_ago_eps <= 0:
+                return ScreenResult(
+                    passed=False,
+                    value=current_eps,
+                    threshold=CANSLIM_MIN_QUARTERLY_EPS_GROWTH,
+                    detail=f"Prior-year net income ≤ 0 ({year_ago_eps:.0f}억), cannot compute growth",
+                )
+
+            growth = (current_eps / year_ago_eps) - 1.0
+            passed = growth >= CANSLIM_MIN_QUARTERLY_EPS_GROWTH
+
+            return ScreenResult(
+                passed=passed,
+                value=growth,
+                threshold=CANSLIM_MIN_QUARTERLY_EPS_GROWTH,
+                detail=(
+                    f"Quarterly NI growth: {growth * 100:.1f}% "
+                    f"(current={current_eps:.0f}억, year-ago={year_ago_eps:.0f}억)"
+                ),
+            )
+
         if len(eps_data) < 5:
+            if market == "KR" and len(eps_data) == 0:
+                return ScreenResult(
+                    passed=False,
+                    detail="No DART financial data available",
+                )
             return ScreenResult(
                 passed=False,
                 detail=f"Insufficient quarterly EPS data ({len(eps_data)} quarters, need 5)",
@@ -258,11 +307,13 @@ class CANSLIMScreener:
             ),
         )
 
-    async def check_a_filter(self, ticker: str) -> ScreenResult:
+    async def check_a_filter(self, ticker: str, *, market: str = "US") -> ScreenResult:
         """**A = Annual EPS CAGR** — 5-year compound annual growth ≥ 25%.
 
         Falls back gracefully when fewer than 5 years are available,
         as long as at least 2 years of data exist.
+
+        Uses DART OpenAPI data for KR market (net income as EPS proxy).
         """
         try:
             eps_data = await self._fundamentals.get_annual_eps(ticker, 5)
@@ -274,6 +325,11 @@ class CANSLIMScreener:
             )
 
         if len(eps_data) < 2:
+            if market == "KR" and len(eps_data) == 0:
+                return ScreenResult(
+                    passed=False,
+                    detail="No DART annual financial data available",
+                )
             return ScreenResult(
                 passed=False,
                 detail=f"Insufficient annual EPS data ({len(eps_data)} years, need ≥ 2)",
@@ -313,7 +369,7 @@ class CANSLIMScreener:
             ),
         )
 
-    async def check_n_filter(self, ticker: str) -> ScreenResult:
+    async def check_n_filter(self, ticker: str, *, market: str = "US") -> ScreenResult:
         """**N = New High** — price within 25% of 52-week high.
 
         Uses the Minervini trend-template threshold of 75%.
@@ -351,12 +407,15 @@ class CANSLIMScreener:
             detail=f"Price at {ratio * 100:.1f}% of 52W high",
         )
 
-    async def check_s_filter(self, ticker: str) -> ScreenResult:
-        """**S = Supply/Demand** — average daily volume ≥ 500K.
+    async def check_s_filter(self, ticker: str, *, market: str = "US") -> ScreenResult:
+        """**S = Supply/Demand** — average daily volume ≥ 500K (US) or ≥ 50K (KR).
 
         Additionally reports the Up/Down volume ratio as a supplementary
         signal when available.
         """
+        # KR market: lower ADV threshold (50K vs 500K for US)
+        min_adv = 50_000 if market == "KR" else CANSLIM_MIN_ADV
+
         try:
             avg_volume = await self._market.get_avg_volume(ticker, 50)
         except Exception:
@@ -372,7 +431,7 @@ class CANSLIMScreener:
                 detail="Average daily volume data not available",
             )
 
-        passed = avg_volume >= CANSLIM_MIN_ADV
+        passed = avg_volume >= min_adv
 
         # Supplementary Up/Down volume ratio check
         ud_detail = ""
@@ -387,12 +446,12 @@ class CANSLIMScreener:
         return ScreenResult(
             passed=passed,
             value=float(avg_volume),
-            threshold=float(CANSLIM_MIN_ADV),
+            threshold=float(min_adv),
             detail=f"ADV={avg_volume:,.0f}{ud_detail}",
         )
 
     async def check_l_filter(
-        self, ticker: str, rs_rating: int | None = None
+        self, ticker: str, rs_rating: int | None = None, *, market: str = "US"
     ) -> ScreenResult:
         """**L = Leader** — RS Rating ≥ 80.
 
@@ -414,7 +473,7 @@ class CANSLIMScreener:
             detail=f"RS Rating={rs_rating}",
         )
 
-    async def check_i_filter(self, ticker: str) -> ScreenResult:
+    async def check_i_filter(self, ticker: str, *, market: str = "US") -> ScreenResult:
         """**I = Institutional Sponsorship** — ≥ 5 institutional holders."""
         try:
             inst_data = await self._fundamentals.get_institutional_data(ticker)
@@ -437,13 +496,17 @@ class CANSLIMScreener:
             detail=f"Holders: {holders_count}, Held: {held_pct * 100:.1f}%",
         )
 
-    async def check_additional(self, ticker: str) -> ScreenResult:
+    async def check_additional(self, ticker: str, *, market: str = "US") -> ScreenResult:
         """**Additional filters** — minimum price and max debt-to-equity.
 
         All sub-checks must pass:
-        - Price ≥ $10
+        - Price ≥ $10 (US) or ≥ ₩5,000 (KR)
         - D/E ≤ 2.0  (benefit of the doubt when D/E is unavailable)
         """
+        # KR market: min price ₩5,000 vs $10 for US
+        min_price = 5_000.0 if market == "KR" else CANSLIM_MIN_PRICE
+        currency = "₩" if market == "KR" else "$"
+
         # ── Price check ──────────────────────────────────────
         try:
             price = await self._market.get_latest_price(ticker)
@@ -460,12 +523,12 @@ class CANSLIMScreener:
                 detail="Latest price not available",
             )
 
-        if price < CANSLIM_MIN_PRICE:
+        if price < min_price:
             return ScreenResult(
                 passed=False,
                 value=price,
-                threshold=CANSLIM_MIN_PRICE,
-                detail=f"Price ${price:.2f} below minimum ${CANSLIM_MIN_PRICE:.2f}",
+                threshold=min_price,
+                detail=f"Price {currency}{price:,.0f} below minimum {currency}{min_price:,.0f}",
             )
 
         # ── Debt-to-Equity check ─────────────────────────────
@@ -489,6 +552,6 @@ class CANSLIMScreener:
         return ScreenResult(
             passed=True,
             value=price,
-            threshold=CANSLIM_MIN_PRICE,
-            detail=f"Price=${price:.2f}{de_detail}",
+            threshold=min_price,
+            detail=f"Price={currency}{price:,.0f}{de_detail}",
         )

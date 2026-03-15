@@ -5,6 +5,8 @@ import { Badge } from '@/components/ui/Badge';
 import { LoadingSpinner } from '@/components/ui/LoadingSpinner';
 import { useNearEntryAlerts } from '@/hooks/useAlerts';
 import { useRealtimePrices } from '@/hooks/useRealtimePrices';
+import { useMarket } from '@/hooks/useMarket';
+import { formatPrice } from '@/lib/format';
 import type { BadgeVariant } from '@/components/ui/Badge';
 import type { NearEntryAlert, RealtimePricesResponse } from '@/types/api';
 
@@ -14,10 +16,6 @@ interface AlertColumn {
   render: (row: NearEntryAlert, realtimeData?: RealtimePricesResponse) => React.ReactNode;
 }
 
-function formatPrice(value: number | null): string {
-  if (value == null) return '-';
-  return `$${value.toFixed(2)}`;
-}
 
 function getProximityColor(alert_level: NearEntryAlert['alert_level']): string {
   switch (alert_level) {
@@ -99,13 +97,18 @@ function recomputeAlert(
   return { alertLevel, signalType, proximity20, proximity55 };
 }
 
-function getColumns(): AlertColumn[] {
+function getColumns(market: string): AlertColumn[] {
   return [
     {
       key: 'ticker',
       header: '종목',
       render: (row) => (
-        <span className="font-semibold text-slate-100">{row.ticker}</span>
+        <span className="font-semibold text-slate-100">
+          {row.ticker}
+          {row.name && (
+            <span className="ml-1.5 text-xs font-normal text-slate-400">{row.name}</span>
+          )}
+        </span>
       ),
     },
     {
@@ -116,7 +119,7 @@ function getColumns(): AlertColumn[] {
         const price = rt?.price ?? row.latest_price;
         return (
           <span className="text-slate-200 tabular-nums font-medium">
-            {formatPrice(price)}
+            {formatPrice(price, market)}
           </span>
         );
       },
@@ -147,7 +150,7 @@ function getColumns(): AlertColumn[] {
       header: 'S1 돌파가',
       render: (row) => (
         <span className="text-slate-300 tabular-nums">
-          {formatPrice(row.donchian_upper_20)}
+          {formatPrice(row.donchian_upper_20, market)}
         </span>
       ),
     },
@@ -156,7 +159,7 @@ function getColumns(): AlertColumn[] {
       header: 'S2 돌파가',
       render: (row) => (
         <span className="text-slate-300 tabular-nums">
-          {row.donchian_upper_55 != null ? formatPrice(row.donchian_upper_55) : '-'}
+          {row.donchian_upper_55 != null ? formatPrice(row.donchian_upper_55, market) : '-'}
         </span>
       ),
     },
@@ -209,7 +212,7 @@ function getColumns(): AlertColumn[] {
       header: 'SMA20',
       render: (row) => (
         <span className="text-slate-300 tabular-nums">
-          {formatPrice(row.sma_20)}
+          {formatPrice(row.sma_20, market)}
         </span>
       ),
     },
@@ -227,9 +230,10 @@ function getColumns(): AlertColumn[] {
 }
 
 export function AlertsPage() {
-  const { data, isLoading, error } = useNearEntryAlerts();
+  const { market } = useMarket();
+  const { data, isLoading, error } = useNearEntryAlerts(market);
 
-  const columns = useMemo(() => getColumns(), []);
+  const columns = useMemo(() => getColumns(market), [market]);
 
   const alerts = data?.alerts ?? [];
   const tickers = useMemo(() => alerts.map((a) => a.ticker), [alerts]);

@@ -14,18 +14,19 @@ source="broker" so the dashboard can display them separately.
 from __future__ import annotations
 
 import structlog
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 
 from broker.account import AccountManager
 from core.database import Database
 from web.api.dependencies import get_db, get_account_manager, verify_api_key
+from web.api.routes.watchlist import _load_kr_stock_names
 
 logger = structlog.get_logger(__name__)
 
 router = APIRouter(tags=["positions"])
 
 
-async def _fetch_db_positions(db: Database) -> list[dict]:
+async def _fetch_db_positions(db: Database, market: str = "US") -> list[dict]:
     """Fetch open positions from the bot's internal DB."""
     cursor = await db.conn.execute(
         """
@@ -35,9 +36,10 @@ async def _fetch_db_positions(db: Database) -> list[dict]:
                sector, industry,
                opened_at, closed_at, close_reason, realized_pnl
         FROM positions
-        WHERE status = 'OPEN'
+        WHERE status = 'OPEN' AND market = ?
         ORDER BY opened_at DESC
-        """
+        """,
+        (market,),
     )
     position_rows = await cursor.fetchall()
 
@@ -89,6 +91,7 @@ async def _fetch_db_positions(db: Database) -> list[dict]:
             "realized_pnl": p[14],
             "units": units,
             "source": "bot",
+            "market": market,
         })
 
     return positions
@@ -96,12 +99,13 @@ async def _fetch_db_positions(db: Database) -> list[dict]:
 
 async def _fetch_broker_positions(
     account_mgr: AccountManager | None,
+    market: str = "US",
 ) -> list[dict]:
     """Fetch positions directly from the KIS broker API."""
     if account_mgr is None:
         return []
     try:
-        broker_positions = await account_mgr.get_broker_positions()
+        broker_positions = await account_mgr.get_broker_positions(market=market)
     except Exception:
         logger.warning("broker_positions_fetch_failed", exc_info=True)
         return []
@@ -124,6 +128,7 @@ async def _fetch_broker_positions(
 
 @router.get("/positions", dependencies=[Depends(verify_api_key)])
 async def get_positions(
+    market: str = Query(default="US", description="Market filter"),
     db: Database = Depends(get_db),
     account_mgr: AccountManager | None = Depends(get_account_manager),
 ) -> dict:
@@ -136,12 +141,12 @@ async def get_positions(
         - count: total bot-tracked positions
         - broker_count: total broker positions
     """
-    db_positions = await _fetch_db_positions(db)
+    db_positions = await _fetch_db_positions(db, market)
 
     # Tickers already tracked by the bot
     db_tickers = {p["ticker"] for p in db_positions}
 
-    broker_positions = await _fetch_broker_positions(account_mgr)
+    broker_positions = await _fetch_broker_positions(account_mgr, market)
 
     # 브로커 데이터를 ticker 기준으로 인덱싱
     broker_by_ticker = {bp["ticker"]: bp for bp in broker_positions}
@@ -165,9 +170,32 @@ async def get_positions(
         bp for bp in broker_positions if bp["ticker"] not in db_tickers
     ]
 
+    # 종목명 로드
+    all_tickers = db_tickers | {bp["ticker"] for bp in broker_only}
+    if all_tickers:
+        placeholders = ",".join("?" * len(all_tickers))
+        name_cursor = await db.conn.execute(
+            f"SELECT ticker, name FROM watchlist WHERE ticker IN ({placeholders})",
+            list(all_tickers),
+        )
+        name_map = {r[0]: r[1] for r in await name_cursor.fetchall()}
+    else:
+        name_map = {}
+
+    kr_names = _load_kr_stock_names() if market == "KR" else {}
+    for ticker in all_tickers:
+        if not name_map.get(ticker):
+            name_map[ticker] = kr_names.get(ticker)
+
+    for pos in db_positions:
+        pos["name"] = name_map.get(pos["ticker"])
+    for bp in broker_only:
+        bp["name"] = name_map.get(bp["ticker"])
+
     return {
         "positions": db_positions,
         "broker_positions": broker_only,
         "count": len(db_positions),
         "broker_count": len(broker_only),
+        "market": market,
     }

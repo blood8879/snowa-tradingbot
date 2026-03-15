@@ -1,6 +1,7 @@
-import { useState } from 'react';
+import { useState, useMemo } from 'react';
 import type { ReactNode } from 'react';
 import { useTrades } from '@/hooks/useTrades';
+import { useMarket } from '@/hooks/useMarket';
 import { PageHeader } from '@/components/ui/PageHeader';
 import { DataTable } from '@/components/ui/DataTable';
 import type { Column } from '@/components/ui/DataTable';
@@ -8,6 +9,7 @@ import { Badge } from '@/components/ui/Badge';
 import type { BadgeVariant } from '@/components/ui/Badge';
 import { LoadingSpinner } from '@/components/ui/LoadingSpinner';
 import type { Trade } from '@/types/api';
+import { formatPrice } from '@/lib/format';
 
 const PAGE_SIZE = 20;
 
@@ -92,81 +94,96 @@ function renderExpanded(row: Trade): ReactNode {
   );
 }
 
-const columns: Column<Trade>[] = [
-  {
-    key: 'created_at',
-    header: '시간',
-    render: (row) => (
-      <span className="text-slate-400">{formatTime(row.created_at)}</span>
-    ),
-  },
-  {
-    key: 'ticker',
-    header: '종목',
-    render: (row) => (
-      <span className="font-medium text-slate-100">{row.ticker}</span>
-    ),
-  },
-  {
-    key: 'side',
-    header: '매매',
-    render: (row) => (
-      <Badge variant={getSideVariant(row.side)}>{row.side}</Badge>
-    ),
-  },
-  {
-    key: 'order_type',
-    header: '유형',
-    render: (row) => <span className="text-slate-300">{row.order_type}</span>,
-  },
-  {
-    key: 'requested_shares',
-    header: '주문수량',
-    render: (row) => (
-      <span className="text-slate-300">
-        {row.requested_shares.toLocaleString()}
-      </span>
-    ),
-  },
-  {
-    key: 'requested_price',
-    header: '주문가',
-    render: (row) => (
-      <span className="text-slate-300">
-        ${row.requested_price.toFixed(2)}
-      </span>
-    ),
-  },
-  {
-    key: 'filled_shares',
-    header: '체결수량',
-    render: (row) => (
-      <span className="text-slate-300">
-        {row.filled_shares.toLocaleString()}
-      </span>
-    ),
-  },
-  {
-    key: 'filled_price',
-    header: '체결가',
-    render: (row) => (
-      <span className="text-slate-300">
-        {row.filled_price != null ? `$${row.filled_price.toFixed(2)}` : '—'}
-      </span>
-    ),
-  },
-  {
-    key: 'status',
-    header: '상태',
-    render: (row) => (
-      <Badge variant={getStatusVariant(row.status)}>{row.status}</Badge>
-    ),
-  },
-];
+function getColumns(market: string): Column<Trade>[] {
+  return [
+    {
+      key: 'created_at',
+      header: '시간',
+      render: (row) => (
+        <span className="text-slate-400">{formatTime(row.created_at)}</span>
+      ),
+    },
+    {
+      key: 'ticker',
+      header: '종목',
+      render: (row) => (
+        <div>
+          <span className="font-medium text-slate-100">{row.ticker}</span>
+          {row.name && (
+            <span className="ml-1.5 text-xs text-slate-500">{row.name}</span>
+          )}
+        </div>
+      ),
+    },
+    {
+      key: 'side',
+      header: '매매',
+      render: (row) => (
+        <Badge variant={getSideVariant(row.side)}>{row.side}</Badge>
+      ),
+    },
+    {
+      key: 'trade_type',
+      header: '유형',
+      render: (row) => {
+        const tt = row.trade_type;
+        if (!tt) return <span className="text-slate-500">-</span>;
+        const variant: BadgeVariant = tt.includes('진입') ? 'entry' : tt.includes('피라미딩') ? 'pyramid' : tt.includes('손절') ? 'stop' : tt.includes('청산') ? 'exit' : 'default';
+        return <Badge variant={variant}>{tt}</Badge>;
+      },
+    },
+    {
+      key: 'requested_shares',
+      header: '주문수량',
+      render: (row) => (
+        <span className="text-slate-300">
+          {row.requested_shares.toLocaleString()}
+        </span>
+      ),
+    },
+    {
+      key: 'requested_price',
+      header: '주문가',
+      render: (row) => (
+        <span className="text-slate-300">
+          {formatPrice(row.requested_price, market)}
+        </span>
+      ),
+    },
+    {
+      key: 'filled_shares',
+      header: '체결수량',
+      render: (row) => (
+        <span className="text-slate-300">
+          {row.filled_shares.toLocaleString()}
+        </span>
+      ),
+    },
+    {
+      key: 'filled_price',
+      header: '체결가',
+      render: (row) => (
+        <span className="text-slate-300">
+          {formatPrice(row.filled_price, market)}
+        </span>
+      ),
+    },
+    {
+      key: 'status',
+      header: '상태',
+      render: (row) => (
+        <Badge variant={getStatusVariant(row.status)}>{row.status}</Badge>
+      ),
+    },
+  ];
+}
 
 export function TradesPage() {
+  const { market } = useMarket();
   const [offset, setOffset] = useState(0);
-  const { data, error, isLoading } = useTrades(PAGE_SIZE, offset);
+  const { data, error, isLoading } = useTrades(PAGE_SIZE, offset, market);
+
+  const cols = useMemo(() => getColumns(market), [market]);
 
   if (isLoading) return <LoadingSpinner />;
 
@@ -185,40 +202,60 @@ export function TradesPage() {
     <div>
       <PageHeader title="매매내역" subtitle="주문 실행 이력" />
 
-      <div className="bg-panel rounded-xl border border-slate-700/50 overflow-hidden">
-        <DataTable<Trade>
-          columns={columns}
-          data={trades}
-          rowKey={(row) => row.id}
-          expandable
-          renderExpanded={renderExpanded}
-          emptyMessage="매매내역이 없습니다"
-        />
-      </div>
-
-      {total > 0 && (
-        <div className="flex justify-between items-center mt-4">
-          <span className="text-sm text-slate-400">
-            총 {total}건 중 {offset + 1}~{Math.min(offset + PAGE_SIZE, total)}건
-          </span>
-          <div className="flex gap-2">
-            <button
-              type="button"
-              disabled={offset === 0}
-              onClick={() => setOffset((prev) => Math.max(0, prev - PAGE_SIZE))}
-              className="px-3 py-1.5 text-sm rounded-lg bg-slate-700/50 hover:bg-slate-700 disabled:opacity-30 text-slate-300 transition-colors"
-            >
-              이전
-            </button>
-            <button
-              type="button"
-              disabled={offset + PAGE_SIZE >= total}
-              onClick={() => setOffset((prev) => prev + PAGE_SIZE)}
-              className="px-3 py-1.5 text-sm rounded-lg bg-slate-700/50 hover:bg-slate-700 disabled:opacity-30 text-slate-300 transition-colors"
-            >
-              다음
-            </button>
+      {/* 봇 매매내역 */}
+      {trades.length > 0 && (
+        <>
+          <h3 className="text-sm font-medium text-slate-400 uppercase tracking-wide mb-2">
+            봇 매매내역
+          </h3>
+          <div className="bg-panel rounded-xl border border-slate-700/50 overflow-hidden">
+            <DataTable<Trade>
+              columns={cols}
+              data={trades}
+              rowKey={(row) => row.id}
+              expandable
+              renderExpanded={renderExpanded}
+              emptyMessage="매매내역이 없습니다"
+            />
           </div>
+
+          {total > 0 && (
+            <div className="flex justify-between items-center mt-4">
+              <span className="text-sm text-slate-400">
+                총 {total}건 중 {offset + 1}~{Math.min(offset + PAGE_SIZE, total)}건
+              </span>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  disabled={offset === 0}
+                  onClick={() => setOffset((prev) => Math.max(0, prev - PAGE_SIZE))}
+                  className="px-3 py-1.5 text-sm rounded-lg bg-slate-700/50 hover:bg-slate-700 disabled:opacity-30 text-slate-300 transition-colors"
+                >
+                  이전
+                </button>
+                <button
+                  type="button"
+                  disabled={offset + PAGE_SIZE >= total}
+                  onClick={() => setOffset((prev) => prev + PAGE_SIZE)}
+                  className="px-3 py-1.5 text-sm rounded-lg bg-slate-700/50 hover:bg-slate-700 disabled:opacity-30 text-slate-300 transition-colors"
+                >
+                  다음
+                </button>
+              </div>
+            </div>
+          )}
+        </>
+      )}
+
+      {/* 봇 매매내역이 비어있을 때 */}
+      {trades.length === 0 && (
+        <div className="bg-panel rounded-xl border border-slate-700/50 overflow-hidden">
+          <DataTable<Trade>
+            columns={cols}
+            data={[]}
+            rowKey={(row) => row.id}
+            emptyMessage="매매내역이 없습니다"
+          />
         </div>
       )}
     </div>

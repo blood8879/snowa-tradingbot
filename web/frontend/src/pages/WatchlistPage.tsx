@@ -6,6 +6,7 @@ import { Badge } from '@/components/ui/Badge';
 import { LoadingSpinner } from '@/components/ui/LoadingSpinner';
 import { useWatchlist } from '@/hooks/useWatchlist';
 import { useRealtimePrices } from '@/hooks/useRealtimePrices';
+import { useMarket } from '@/hooks/useMarket';
 import type { Column } from '@/components/ui/DataTable';
 import type { WatchlistStock, RealtimePricesResponse } from '@/types/api';
 
@@ -14,16 +15,20 @@ function formatPct(value: number | null): string {
   return `${(value * 100).toFixed(1)}%`;
 }
 
-function formatPrice(value: number | null): string {
+function formatPrice(value: number | null, market: string): string {
   if (value == null) return '—';
+  if (market === 'KR') {
+    return `₩${Math.round(value).toLocaleString()}`;
+  }
   return `$${value.toFixed(2)}`;
 }
 
-function formatVolume(value: number | null): string {
+function formatCurrency(value: number | null, market: string): string {
   if (value == null) return '—';
-  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
-  if (value >= 1_000) return `${(value / 1_000).toFixed(0)}K`;
-  return value.toLocaleString();
+  if (market === 'KR') {
+    return `₩${Math.round(value).toLocaleString()}`;
+  }
+  return `$${value.toLocaleString()}`;
 }
 
 function getPctColorClass(value: number | null): string {
@@ -33,13 +38,20 @@ function getPctColorClass(value: number | null): string {
   return 'text-slate-300';
 }
 
-function getColumns(realtimeData?: RealtimePricesResponse): Column<WatchlistStock>[] {
+function getColumns(realtimeData: RealtimePricesResponse | undefined, market: string): Column<WatchlistStock>[] {
   return [
     {
       key: 'ticker',
       header: '종목',
       sortable: true,
-      render: (row) => <span className="font-semibold text-slate-100">{row.ticker}</span>,
+      render: (row) => (
+        <span className="font-semibold text-slate-100">
+          {row.ticker}
+          {row.name && (
+            <span className="ml-1.5 text-xs font-normal text-slate-400">{row.name}</span>
+          )}
+        </span>
+      ),
     },
     {
       key: 'latest_price',
@@ -50,7 +62,7 @@ function getColumns(realtimeData?: RealtimePricesResponse): Column<WatchlistStoc
         const price = rt?.price ?? row.latest_price;
         return (
           <span className="text-slate-200 tabular-nums font-medium">
-            {formatPrice(price)}
+            {formatPrice(price, market)}
           </span>
         );
       },
@@ -91,7 +103,7 @@ function getColumns(realtimeData?: RealtimePricesResponse): Column<WatchlistStoc
       sortable: true,
       render: (row) => (
         <span className="text-amber-300 tabular-nums font-medium">
-          {row.n_value != null ? `$${row.n_value.toFixed(2)}` : '—'}
+          {row.n_value != null ? formatPrice(row.n_value, market) : '—'}
         </span>
       ),
     },
@@ -111,7 +123,7 @@ function getColumns(realtimeData?: RealtimePricesResponse): Column<WatchlistStoc
       sortable: true,
       render: (row) => (
         <span className="text-cyan-300 tabular-nums font-medium">
-          {row.unit_value != null ? `$${row.unit_value.toLocaleString()}` : '—'}
+          {row.unit_value != null ? formatCurrency(row.unit_value, market) : '—'}
         </span>
       ),
     },
@@ -121,7 +133,7 @@ function getColumns(realtimeData?: RealtimePricesResponse): Column<WatchlistStoc
       sortable: true,
       render: (row) => (
         <span className="text-violet-300 tabular-nums font-medium">
-          {row.max_position_value != null ? `$${row.max_position_value.toLocaleString()}` : '—'}
+          {row.max_position_value != null ? formatCurrency(row.max_position_value, market) : '—'}
         </span>
       ),
     },
@@ -136,38 +148,6 @@ function getColumns(realtimeData?: RealtimePricesResponse): Column<WatchlistStoc
       ),
     },
     {
-      key: 'realtime_volume',
-      header: '실시간 거래량',
-      sortable: false,
-      render: (row) => {
-        const rt = realtimeData?.prices[row.ticker];
-        const vol = rt?.volume;
-        const avg50 = row.avg_volume_50d;
-        const ratio = vol != null && avg50 != null && avg50 > 0 ? vol / avg50 : null;
-        const ratioColor = ratio != null && ratio >= 1.5 ? 'text-emerald-400' : ratio != null && ratio >= 1.0 ? 'text-green-400' : 'text-slate-300';
-        return (
-          <span className="tabular-nums">
-            <span className="text-slate-200">{vol != null ? formatVolume(vol) : '—'}</span>
-            {ratio != null && (
-              <span className={`ml-1 text-xs ${ratioColor}`}>
-                ({ratio.toFixed(1)}x)
-              </span>
-            )}
-          </span>
-        );
-      },
-    },
-    {
-      key: 'avg_volume_50d',
-      header: '50일 평균',
-      sortable: true,
-      render: (row) => (
-        <span className="text-slate-400 tabular-nums">
-          {formatVolume(row.avg_volume_50d)}
-        </span>
-      ),
-    },
-    {
       key: 'minervini_pass',
       header: '미너비니',
       render: (row) => (
@@ -175,6 +155,17 @@ function getColumns(realtimeData?: RealtimePricesResponse): Column<WatchlistStoc
           {row.minervini_pass ? 'PASS' : 'FAIL'}
         </Badge>
       ),
+    },
+    {
+      key: 'added_date',
+      header: '편입일',
+      sortable: true,
+      render: (row) => {
+        if (!row.added_date) return <span className="text-slate-500">—</span>;
+        const parts = row.added_date.split('-');
+        const formatted = `${parts[0].slice(2)}/${parts[1]}/${parts[2]}`;
+        return <span className="text-slate-400 text-xs tabular-nums">{formatted}</span>;
+      },
     },
     {
       key: 'latest_financial_date',
@@ -251,9 +242,9 @@ function sortWatchlist(
         aVal = a.max_position_value;
         bVal = b.max_position_value;
         break;
-      case 'avg_volume_50d':
-        aVal = a.avg_volume_50d;
-        bVal = b.avg_volume_50d;
+      case 'added_date':
+        aVal = a.added_date ?? '';
+        bVal = b.added_date ?? '';
         break;
       case 'latest_financial_date':
         aVal = a.latest_financial_date ?? '';
@@ -282,7 +273,8 @@ function sortWatchlist(
 }
 
 export function WatchlistPage() {
-  const { data, isLoading, error } = useWatchlist();
+  const { market } = useMarket();
+  const { data, isLoading, error } = useWatchlist(market);
   const [sortState, setSortState] = useState<SortState | null>(null);
   const watchlistTickers = useMemo(() => (data?.watchlist ?? []).map((s) => s.ticker), [data]);
   const { data: realtimeData } = useRealtimePrices(watchlistTickers);
@@ -322,7 +314,7 @@ export function WatchlistPage() {
     return (sum / valid.length).toFixed(1);
   }, [watchlist]);
 
-  const columns = useMemo(() => getColumns(realtimeData), [realtimeData]);
+  const columns = useMemo(() => getColumns(realtimeData, market), [realtimeData, market]);
 
   if (isLoading) {
     return <LoadingSpinner />;

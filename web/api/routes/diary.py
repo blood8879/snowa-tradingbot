@@ -7,7 +7,9 @@ optionally filtered by ticker. Joined with position data for P&L context.
 
 from __future__ import annotations
 
+import csv
 import json
+from pathlib import Path
 
 import structlog
 from fastapi import APIRouter, Depends, Query
@@ -20,6 +22,21 @@ logger = structlog.get_logger(__name__)
 router = APIRouter(tags=["diary"])
 
 
+def _load_kr_stock_names() -> dict[str, str]:
+    cache_path = Path("data/universe_kr_cache.csv")
+    names: dict[str, str] = {}
+    if not cache_path.exists():
+        return names
+    try:
+        with open(cache_path, "r", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                names[row["ticker"]] = row["name"]
+    except Exception:
+        pass
+    return names
+
+
 @router.get("/diary", dependencies=[Depends(verify_api_key)])
 async def get_diary(
     ticker: str = Query(
@@ -28,6 +45,7 @@ async def get_diary(
     ),
     limit: int = Query(default=50, ge=1, le=200, description="Results per page"),
     offset: int = Query(default=0, ge=0, description="Pagination offset"),
+    market: str = Query(default="US", description="Market filter (US, KR, ALL)"),
     db: Database = Depends(get_db),
 ) -> dict:
     """종목별 매매 기록 + 전략 컨텍스트 조회.
@@ -52,6 +70,10 @@ async def get_diary(
     if ticker:
         where_parts.append("o.ticker = ?")
         params.append(ticker.upper())
+
+    if market and market != "ALL":
+        where_parts.append("o.market = ?")
+        params.append(market)
 
     where_sql = " AND ".join(where_parts)
 
@@ -85,6 +107,8 @@ async def get_diary(
     cursor = await db.conn.execute(query, query_params)
     rows = await cursor.fetchall()
 
+    kr_names = _load_kr_stock_names() if market == "KR" else {}
+
     entries = []
     for r in rows:
         raw_notes = r[11]
@@ -95,9 +119,11 @@ async def get_diary(
             except (json.JSONDecodeError, TypeError):
                 parsed_context = {"raw": raw_notes}
 
+        ticker = r[1]
         entries.append({
             "order_id": r[0],
-            "ticker": r[1],
+            "ticker": ticker,
+            "name": kr_names.get(ticker) if market == "KR" else None,
             "side": r[2],
             "order_type": r[3],
             "requested_shares": r[4],
@@ -117,12 +143,23 @@ async def get_diary(
         })
 
     # ── 필터 드롭다운용 종목 목록 ──
+    ticker_where = ["o.notes IS NOT NULL", "o.notes != ''"]
+    ticker_params: list = []
+    if market and market != "ALL":
+        ticker_where.append("p.market = ?")
+        ticker_params.append(market)
+
     ticker_cursor = await db.conn.execute(
-        """
-        SELECT DISTINCT ticker FROM orders
-        WHERE notes IS NOT NULL AND notes != ''
-        ORDER BY ticker
+        f"""
+        SELECT DISTINCT o.ticker FROM orders o
+        LEFT JOIN positions p
+            ON o.ticker = p.ticker
+            AND o.created_at >= p.opened_at
+            AND o.created_at <= COALESCE(p.closed_at, '9999-12-31')
+        WHERE {" AND ".join(ticker_where)}
+        ORDER BY o.ticker
         """,
+        ticker_params,
     )
     available_tickers = [row[0] for row in await ticker_cursor.fetchall()]
 

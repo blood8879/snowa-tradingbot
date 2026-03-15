@@ -11,7 +11,7 @@ Pure functions — no side effects.
 
 from __future__ import annotations
 
-from config.constants import MAX_UNITS_PER_STOCK, PYRAMID_INTERVAL_N
+from config.constants import MAX_CHASE_PCT, MAX_UNITS_PER_STOCK, PYRAMID_INTERVAL_N
 from strategy.stop_loss import calculate_stop_price
 
 
@@ -90,6 +90,20 @@ def check_pyramid_signal(
                 f"Price {current_price:.2f} below trigger {trigger_price:.2f}"
             ),
         }
+
+    # Chase guard: skip if price ran too far above trigger (CANSLIM 5% rule)
+    if trigger_price > 0:
+        chase_pct = (current_price - trigger_price) / trigger_price
+        if chase_pct > MAX_CHASE_PCT:
+            return {
+                "add": False,
+                "next_unit_number": current_units + 1,
+                "trigger_price": trigger_price,
+                "reason": (
+                    f"Pyramid chase guard: price {chase_pct:.1%} above trigger "
+                    f"(max {MAX_CHASE_PCT:.0%})"
+                ),
+            }
 
     return {
         "add": True,

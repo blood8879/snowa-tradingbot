@@ -9,6 +9,7 @@ from broker.account import AccountManager
 from core.database import Database
 from web.api.dependencies import get_db, get_account_manager, verify_api_key
 from web.api.routes.market_filter_calc import compute_market_filter
+from web.api.routes.watchlist import _load_kr_stock_names
 
 logger = structlog.get_logger(__name__)
 
@@ -16,11 +17,21 @@ router = APIRouter(tags=["alerts"])
 
 
 @router.get("/alerts/near-entry", dependencies=[Depends(verify_api_key)])
-async def get_near_entry_alerts(db: Database = Depends(get_db)) -> dict:
+async def get_near_entry_alerts(
+    market: str = "US",
+    db: Database = Depends(get_db),
+    account_mgr: AccountManager | None = Depends(get_account_manager),
+) -> dict:
+    params: list = []
+    market_clause = ""
+    if market and market != "ALL":
+        market_clause = "AND w.market = ?"
+        params.append(market)
+
     watchlist_cursor = await db.conn.execute(
-        """
+        f"""
         SELECT w.ticker, w.rs_rating, w.custom_composite_score, w.latest_price,
-               f.latest_report_date
+               f.latest_report_date, w.name, w.exchange
         FROM watchlist w
         LEFT JOIN (
             SELECT ticker, MAX(report_date) AS latest_report_date
@@ -28,9 +39,43 @@ async def get_near_entry_alerts(db: Database = Depends(get_db)) -> dict:
             GROUP BY ticker
         ) f ON f.ticker = w.ticker
         WHERE w.status = 'ACTIVE'
-        """
+        {market_clause}
+        """,
+        params,
     )
     watchlist_rows = await watchlist_cursor.fetchall()
+
+    # KR 종목명 CSV fallback
+    kr_names = _load_kr_stock_names() if market == "KR" else {}
+
+    # 실시간 가격 조회 (KIS REST API) — 전체 5초 타임아웃, 실패 시 DB 캐시 사용
+    realtime_prices: dict[str, float] = {}
+    if account_mgr is not None:
+        import asyncio
+
+        async def _fetch_realtime() -> None:
+            rest_client = account_mgr._rest
+            for row in watchlist_rows:
+                ticker = row[0]
+                exchange = row[6] or ("J" if market == "KR" else "NASD")
+                try:
+                    if market == "KR":
+                        price_data = await rest_client.get_current_price(ticker, exchange, market="KR")
+                        raw = price_data.get("stck_prpr", "0")
+                    else:
+                        price_data = await rest_client.get_current_price(ticker, exchange, market="US")
+                        raw = price_data.get("last", "0")
+                    val = float(raw)
+                    if val > 0:
+                        realtime_prices[ticker] = val
+                    await asyncio.sleep(0.35)  # KIS rate limit 방지
+                except Exception:
+                    logger.debug("alerts_realtime_price_failed", ticker=ticker, market=market)
+
+        try:
+            await asyncio.wait_for(_fetch_realtime(), timeout=5.0)
+        except asyncio.TimeoutError:
+            logger.warning("alerts_realtime_price_timeout", market=market, fetched=len(realtime_prices))
 
     alerts: list[dict] = []
 
@@ -40,6 +85,7 @@ async def get_near_entry_alerts(db: Database = Depends(get_db)) -> dict:
         composite_score = row[2]
         latest_price = row[3]
         latest_financial_date = row[4]
+        name = row[5] or kr_names.get(ticker)
 
         prices_cursor = await db.conn.execute(
             """
@@ -53,8 +99,10 @@ async def get_near_entry_alerts(db: Database = Depends(get_db)) -> dict:
         )
         price_rows = await prices_cursor.fetchall()
 
-        # Fall back to latest close from daily_prices if watchlist.latest_price is null
-        if latest_price is None and price_rows:
+        # 실시간 가격 > daily_prices 종가 > watchlist.latest_price 순으로 우선
+        if ticker in realtime_prices:
+            latest_price = realtime_prices[ticker]
+        elif price_rows and price_rows[0][2]:
             latest_price = price_rows[0][2]
 
         if latest_price is None:
@@ -106,6 +154,7 @@ async def get_near_entry_alerts(db: Database = Depends(get_db)) -> dict:
 
         alerts.append({
             "ticker": ticker,
+            "name": name,
             "latest_price": latest_price,
             "donchian_upper_20": donchian_upper_20,
             "donchian_upper_55": donchian_upper_55,
@@ -136,20 +185,46 @@ async def get_near_entry_alerts(db: Database = Depends(get_db)) -> dict:
 
 
 @router.get("/alerts/near-exit", dependencies=[Depends(verify_api_key)])
-async def get_near_exit_alerts(db: Database = Depends(get_db)) -> dict:
+async def get_near_exit_alerts(
+    market: str = "US",
+    db: Database = Depends(get_db),
+    account_mgr: AccountManager | None = Depends(get_account_manager),
+) -> dict:
+    # 브로커 실시간 데이터 조회 (해당 시장 기준)
+    broker_by_ticker: dict[str, dict] = {}
+    if account_mgr is not None:
+        try:
+            broker_positions = await account_mgr.get_broker_positions(market=market)
+            broker_by_ticker = {bp["ticker"]: bp for bp in broker_positions}
+        except Exception:
+            logger.warning("exit_alerts_broker_fetch_failed", exc_info=True)
+
+    pos_params: list = []
+    pos_market_clause = ""
+    if market and market != "ALL":
+        pos_market_clause = "AND market = ?"
+        pos_params.append(market)
+
     pos_cursor = await db.conn.execute(
-        """
-        SELECT id, ticker, system, avg_entry_price
-        FROM positions
-        WHERE status = 'OPEN'
-        """
+        f"""
+        SELECT p.id, p.ticker, p.system, p.avg_entry_price, w.name
+        FROM positions p
+        LEFT JOIN watchlist w ON w.ticker = p.ticker
+        WHERE p.status = 'OPEN'
+        {pos_market_clause.replace("market", "p.market")}
+        """,
+        pos_params,
     )
     pos_rows = await pos_cursor.fetchall()
+
+    # KR 종목명 CSV fallback
+    kr_names_exit = _load_kr_stock_names() if market == "KR" else {}
 
     alerts: list[dict] = []
 
     for row in pos_rows:
         ticker = row[1]
+        stock_name = row[4] or kr_names_exit.get(ticker)
         system = row[2] or "S1"
         entry_price = row[3]
 
@@ -168,9 +243,15 @@ async def get_near_exit_alerts(db: Database = Depends(get_db)) -> dict:
         if not price_rows:
             continue
 
-        current_price = price_rows[0][2]
+        # 실시간 가격 우선, 없으면 daily_prices 종가 폴백
+        bp = broker_by_ticker.get(ticker)
+        current_price = bp["current_price"] if bp and bp["current_price"] > 0 else price_rows[0][2]
         if current_price is None:
             continue
+
+        # 브로커 매입가 우선, 없으면 DB avg_entry_price 폴백
+        if bp and bp.get("avg_price") and bp["avg_price"] > 0:
+            entry_price = bp["avg_price"]
 
         lows_10 = [r[1] for r in price_rows[:10]] if len(price_rows) >= 10 else [r[1] for r in price_rows]
         lows_20 = [r[1] for r in price_rows[:20]] if len(price_rows) >= 20 else [r[1] for r in price_rows]
@@ -181,7 +262,11 @@ async def get_near_exit_alerts(db: Database = Depends(get_db)) -> dict:
         relevant_exit = donchian_lower_10 if system == "S1" else donchian_lower_20
         exit_proximity_pct = ((current_price - relevant_exit) / current_price) * 100 if current_price else 0.0
 
-        unrealized_pnl_pct = ((current_price - entry_price) / entry_price) * 100 if entry_price else 0.0
+        # 브로커 실시간 P&L 우선, 없으면 자체 계산 폴백
+        if bp and bp.get("pnl_pct") is not None:
+            unrealized_pnl_pct = bp["pnl_pct"]
+        else:
+            unrealized_pnl_pct = ((current_price - entry_price) / entry_price) * 100 if entry_price else 0.0
 
         if exit_proximity_pct <= 2.0:
             exit_level = "critical"
@@ -192,6 +277,7 @@ async def get_near_exit_alerts(db: Database = Depends(get_db)) -> dict:
 
         alerts.append({
             "ticker": ticker,
+            "name": stock_name,
             "position_side": "LONG",
             "entry_price": round(entry_price, 2),
             "current_price": round(current_price, 2),

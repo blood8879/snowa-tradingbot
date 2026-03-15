@@ -6,8 +6,11 @@ GET /api/watchlist — returns active watchlist stocks sorted by composite score
 
 from __future__ import annotations
 
+import csv
+from pathlib import Path
+
 import structlog
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 
 from broker.account import AccountManager
 from core.database import Database
@@ -18,6 +21,22 @@ from web.api.dependencies import get_db, get_account_manager, verify_api_key
 logger = structlog.get_logger(__name__)
 
 router = APIRouter(tags=["watchlist"])
+
+
+def _load_kr_stock_names() -> dict[str, str]:
+    """Load KR stock names from universe cache CSV."""
+    cache_path = Path("data/universe_kr_cache.csv")
+    names: dict[str, str] = {}
+    if not cache_path.exists():
+        return names
+    try:
+        with open(cache_path, "r", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                names[row["ticker"]] = row["name"]
+    except Exception:
+        pass
+    return names
 
 
 async def _calc_n_value(db: Database, ticker: str) -> float | None:
@@ -65,6 +84,7 @@ async def _calc_avg_volume_50d(db: Database, ticker: str) -> float | None:
 
 @router.get("/watchlist", dependencies=[Depends(verify_api_key)])
 async def get_watchlist(
+    market: str = Query(default="US", description="Market filter"),
     db: Database = Depends(get_db),
     account_mgr: AccountManager | None = Depends(get_account_manager),
 ) -> dict:
@@ -95,26 +115,31 @@ async def get_watchlist(
             FROM fundamentals
             GROUP BY ticker
         ) f ON f.ticker = w.ticker
-        WHERE w.status = 'ACTIVE'
+        WHERE w.status = 'ACTIVE' AND w.market = ?
         ORDER BY w.custom_composite_score DESC NULLS LAST
-        """
+        """,
+        (market,),
     )
     rows = await cursor.fetchall()
 
     # 실시간 계좌 equity 조회 (유닛 사이징 계산용)
+    # US → USD 잔고, KR → KRW 잔고 (각 시장별 별도 조회)
     account_equity = 0.0
     if account_mgr is not None:
         try:
-            info = await account_mgr.get_account_info()
+            info = await account_mgr.get_account_info(market=market)
             account_equity = info.total_equity
         except Exception as exc:
-            logger.warning("watchlist_equity_fetch_failed", error=str(exc))
+            logger.warning("watchlist_equity_fetch_failed", error=str(exc), market=market)
 
     max_position_value = (
         round(calculate_max_position_value(account_equity), 2)
         if account_equity > 0
         else None
     )
+
+    # KR 종목명 로드
+    kr_names = _load_kr_stock_names() if market == "KR" else {}
 
     stocks = []
     for r in rows:
@@ -133,14 +158,18 @@ async def get_watchlist(
                 entry_price=latest_price,
                 n_value=n_value,
                 avg_daily_volume=int(avg_volume_50d) if avg_volume_50d else None,
+                market=market,
             )
             if not sizing.get("skip"):
                 unit_shares = sizing["shares"]
                 unit_value = round(sizing["position_value"], 2)
                 unit_stop_price = round(sizing["stop_price"], 2)
 
+        stock_name = kr_names.get(ticker) if market == "KR" else None
+
         stocks.append({
             "ticker": ticker,
+            "name": stock_name,
             "added_date": r[1],
             "last_screened": r[2],
             "quarterly_eps_growth": r[3],
@@ -163,10 +192,12 @@ async def get_watchlist(
             "unit_value": unit_value,
             "unit_stop_price": unit_stop_price,
             "max_position_value": max_position_value,
+            "market": market,
         })
 
     return {
         "watchlist": stocks,
         "count": len(stocks),
         "account_equity": round(account_equity, 2) if account_equity > 0 else None,
+        "market": market,
     }

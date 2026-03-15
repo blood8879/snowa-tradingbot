@@ -35,6 +35,8 @@ def calculate_unit_shares(
     entry_price: float,
     n_value: float,
     avg_daily_volume: int | None = None,
+    *,
+    market: str = "US",
 ) -> dict:
     """Calculate the number of shares for one unit.
 
@@ -56,6 +58,8 @@ def calculate_unit_shares(
         n_value: Current ATR (N) value.
         avg_daily_volume: Average daily volume in shares. None to skip
             the ADV constraint.
+        market: Market code ("US" or "KR"). KR applies tick adjustment
+            to stop price.
 
     Returns:
         Dict with keys: ``shares``, ``skip``, and when skip is False:
@@ -88,6 +92,17 @@ def calculate_unit_shares(
     if shares < 1:
         return {"shares": 0, "skip": True, "reason": "Insufficient capital"}
 
+    # KR market: adjust stop price to tick units
+    if market == "KR":
+        from config.market_config import adjust_price_to_tick, KR_TICK_SIZE_TABLE
+        stop_price = adjust_price_to_tick(entry_price - stop_distance, KR_TICK_SIZE_TABLE)
+        # Recalculate stop_distance based on tick-adjusted stop
+        stop_distance = entry_price - stop_price
+        if stop_distance <= 0:
+            return {"shares": 0, "skip": True, "reason": "Stop distance zero after tick adjustment"}
+    else:
+        stop_price = entry_price - stop_distance
+
     position_value = shares * entry_price
     risk_amount = shares * stop_distance
 
@@ -95,11 +110,12 @@ def calculate_unit_shares(
         "shares": shares,
         "skip": False,
         "stop_distance": stop_distance,
-        "stop_price": entry_price - stop_distance,
+        "stop_price": stop_price,
         "position_value": position_value,
         "position_pct": position_value / account_equity,
         "risk_amount": risk_amount,
         "risk_pct": risk_amount / account_equity,
+        "market": market,
     }
 
 
@@ -128,6 +144,8 @@ def can_afford_position(
     entry_price: float,
     shares: int,
     existing_position_value: float = 0.0,
+    *,
+    market: str = "US",
 ) -> bool:
     """Check whether adding a new unit would stay within position limits.
 
@@ -140,6 +158,7 @@ def can_afford_position(
         shares: Number of shares in the new unit.
         existing_position_value: Dollar value of units already held
             in this position.
+        market: Market code ("US" or "KR"). Pass-through for consistency.
 
     Returns:
         True if the position would remain within limits.

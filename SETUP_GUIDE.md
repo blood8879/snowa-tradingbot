@@ -1,7 +1,7 @@
 # SNOWA Trading Bot — 설정 및 실행 가이드
 
-> CANSLIM × Turtle Trading 하이브리드 자동매매 봇  
-> 한국투자증권 Open API 기반 미국 주식 자동매매
+> CANSLIM × Turtle Trading 하이브리드 자동매매 봇
+> 한국투자증권 Open API 기반 미국/한국 주식 자동매매
 
 ---
 
@@ -22,6 +22,7 @@
 13. [클라우드 서버 배포](#13-클라우드-서버-배포)
 14. [문제 해결 (FAQ)](#14-문제-해결-faq)
 15. [프로젝트 구조](#15-프로젝트-구조)
+16. [한국 시장 (KR) 설정](#16-한국-시장-kr-설정)
 
 ---
 
@@ -170,8 +171,10 @@ LOG_FILE=logs/snowa_bot.log
 
 ## 6. 초기 데이터 수집
 
-봇을 처음 실행하기 전에 과거 데이터를 수집해야 합니다.  
-**약 2~4시간 소요** (8,000+ 종목 대상).
+봇을 처음 실행하기 전에 과거 데이터를 수집해야 합니다.
+**약 2~4시간 소요** (미국 8,000+ 종목 대상).
+
+> **한국 시장**: 한국 시장 데이터는 pykrx를 통해 봇 실행 시 자동으로 수집됩니다. 별도의 초기 데이터 수집이 필요하지 않습니다.
 
 ### 6.1 전체 데이터 수집 (권장)
 
@@ -229,6 +232,8 @@ snowa-bot
 
 ### 7.2 봇 동작 사이클 (자동)
 
+#### 미국 시장 (US)
+
 | 시간 (KST) | 동작 | 설명 |
 |------------|------|------|
 | **22:00** | 장전 준비 | 토큰 갱신, 데이터 갱신, ATR/Donchian 계산, 트리거 사전 계산 |
@@ -236,6 +241,18 @@ snowa-bot
 | **23:30~06:00** | 장중 모니터링 | 실시간 틱 수신 → 손절/피라미딩/진입/청산 신호 판단 |
 | **06:00** | 장 종료 | WebSocket 종료 |
 | **06:30** | 장후 정리 | 브로커 동기화, 미체결 처리, 일일 리포트 생성 |
+
+#### 한국 시장 (KR)
+
+| 시간 (KST) | 동작 | 설명 |
+|------------|------|------|
+| **08:00** | 장전 준비 | 토큰 갱신, pykrx 데이터 갱신, ATR/Donchian 계산 |
+| **09:00** | 장 시작 | WebSocket 연결 (국내), 실시간 모니터링 시작 |
+| **09:00~15:30** | 장중 모니터링 | 실시간 틱 수신 → 손절/피라미딩/진입/청산 신호 판단 |
+| **15:30** | 장 종료 | WebSocket 종료 |
+| **16:00** | 장후 정리 | 브로커 동기화, 미체결 처리, 일일 리포트 생성 |
+
+> **참고**: 미국/한국 시장은 **독립적으로 스케줄링**됩니다. 두 시장을 동시에 활성화하면 각각의 스케줄에 따라 자동 운영됩니다.
 
 ### 7.3 백그라운드 실행 (서버)
 
@@ -266,12 +283,16 @@ uvicorn web.api.main:app --host 0.0.0.0 --port 8000
 
 | 엔드포인트 | 설명 |
 |-----------|------|
-| `GET /api/status` | 봇 상태 (모드, 시장필터, 유닛, 계좌) |
-| `GET /api/positions` | 보유 포지션 (유닛별 상세) |
-| `GET /api/watchlist` | 워치리스트 (CANSLIM 점수) |
-| `GET /api/trades?limit=20` | 최근 거래 내역 |
-| `GET /api/pnl?period=daily` | 수익률 (일/주/월별) |
+| `GET /api/status?market=US` | 봇 상태 (모드, 시장필터, 유닛, 계좌) |
+| `GET /api/positions?market=US` | 보유 포지션 (유닛별 상세) |
+| `GET /api/watchlist?market=US` | 워치리스트 (CANSLIM 점수) |
+| `GET /api/trades?limit=20&market=US` | 최근 거래 내역 |
+| `GET /api/pnl?period=daily&market=US` | 수익률 (일/주/월별) |
 | `GET /api/journal?month=2026-02` | 매매일지 (승률, R:R) |
+| `GET /api/market/status` | 시장별 활성화 상태 조회 |
+| `POST /api/market/{market_id}/toggle` | 시장 활성화/비활성화 토글 |
+
+> **market 파라미터**: 모든 조회 API에 `market=US` (기본값) 또는 `market=KR`을 지정할 수 있습니다. 생략 시 미국 시장이 조회됩니다.
 
 ### 8.4 API 키 인증 (선택)
 
@@ -580,6 +601,23 @@ server {
 - 배치 100종목씩 + 1초 딜레이 (차단 방지)
 - 이후 증분 업데이트만 하므로 빠름
 
+### Q: 한국 시장 워치리스트가 비어있어요
+
+**원인**: pykrx 미설치 또는 한국 시장 미활성화
+**해결**:
+1. `pip install pykrx` 설치 확인
+2. API로 한국 시장 활성화: `POST /api/market/KR/toggle` with `{"enabled": true}`
+3. 봇 재시작 후 한국 장전 준비(08:00 KST)에 자동 스크리닝 실행 대기
+4. 수동 확인: `curl http://localhost:8000/api/watchlist?market=KR`
+
+### Q: KODEX200 시장 필터가 FAIL이에요
+
+**원인**: pykrx에서 KODEX200 데이터를 가져오지 못했거나 시장 약세
+**해결**:
+- `curl http://localhost:8000/api/status?market=KR`로 시장 필터 상태 확인
+- `close < sma200`이면 정상적인 FAIL (약세장 → 신규 진입 차단)
+- 데이터 미수신 시 pykrx 버전 업데이트: `pip install --upgrade pykrx`
+
 ### Q: DB 파일이 손상된 것 같아요
 
 **해결**:
@@ -608,7 +646,8 @@ snowa_tradingbot/
 │
 ├── config/                 # 설정
 │   ├── settings.py         # pydantic-settings (환경변수 로드)
-│   ├── constants.py        # 전략 상수 (204줄, 모든 임계값)
+│   ├── constants.py        # 전략 상수 (모든 임계값)
+│   ├── market_config.py    # 시장별 설정 (US/KR 스케줄, 거래소, 벤치마크)
 │   └── logging_config.py   # structlog 설정
 │
 ├── core/                   # 핵심 인프라
@@ -624,9 +663,10 @@ snowa_tradingbot/
 │   └── account.py          # 계좌 관리
 │
 ├── data/                   # 데이터 레이어
-│   ├── universe.py         # NYSE+NASDAQ 유니버스
-│   ├── fundamental_data.py # 재무 데이터 (yfinance)
-│   ├── price_cache.py      # 가격 캐시
+│   ├── universe.py         # NYSE+NASDAQ 유니버스 (US)
+│   ├── universe_kr.py      # KOSPI+KOSDAQ 유니버스 (KR, pykrx)
+│   ├── fundamental_data.py # 재무 데이터 (US: yfinance, KR: pykrx)
+│   ├── price_cache.py      # 가격 캐시 (US: yfinance, KR: pykrx)
 │   └── market_data.py      # 통합 시세 인터페이스
 │
 ├── screening/              # CANSLIM 스크리닝
@@ -666,8 +706,16 @@ snowa_tradingbot/
 │   ├── api/
 │   │   ├── main.py         # FastAPI 엔트리포인트
 │   │   ├── dependencies.py # DB, 인증
-│   │   └── routes/         # 6개 API 라우트
-│   └── frontend/           # React (향후 확장)
+│   │   └── routes/         # API 라우트 (시장별 필터 지원)
+│   │       ├── status.py           # 봇 상태
+│   │       ├── positions.py        # 포지션 조회
+│   │       ├── watchlist.py        # 워치리스트
+│   │       ├── trades.py           # 거래 내역
+│   │       ├── performance.py      # 수익률
+│   │       ├── journal.py          # 매매일지
+│   │       ├── market_control.py   # 시장 토글 API (US/KR)
+│   │       └── ...
+│   └── frontend/           # React SPA (시장 선택기 포함)
 │
 ├── scripts/                # 유틸리티
 │   ├── run_bot.py          # 메인 진입점
@@ -682,7 +730,142 @@ snowa_tradingbot/
 
 ---
 
+## 16. 한국 시장 (KR) 설정
+
+### 16.1 개요
+
+SNOWA Trading Bot은 미국 시장(US)과 한국 시장(KR)을 **동시에** 자동매매할 수 있습니다.
+
+| 항목 | 미국 시장 (US) | 한국 시장 (KR) |
+|------|---------------|---------------|
+| 거래소 | NYSE, NASDAQ, AMEX | KOSPI, KOSDAQ |
+| 통화 | USD | KRW |
+| 벤치마크 | SPY (S&P 500 ETF) | KODEX200 (069500) |
+| 데이터 소스 | yfinance | pykrx |
+| 장 시간 (KST) | 23:30 ~ 06:00 | 09:00 ~ 15:30 |
+| 시장 필터 | SPY > 200일 SMA | KODEX200 > 200일 SMA |
+
+### 16.2 추가 의존성 설치
+
+한국 시장 기능은 **pykrx** 라이브러리가 필요합니다:
+
+```bash
+source .venv/bin/activate
+pip install pykrx
+```
+
+> pykrx는 한국거래소(KRX)에서 KOSPI/KOSDAQ 종목 리스트, OHLCV 가격, 재무 데이터를 가져옵니다.
+
+### 16.3 한국 시장 활성화
+
+한국 시장은 기본적으로 **비활성화** 상태입니다. 활성화 방법:
+
+#### 방법 1: 웹 대시보드 (권장)
+
+1. 대시보드 접속
+2. 사이드바에서 시장 선택기 확인 (🇺🇸 US / 🇰🇷 KR / 🌐 전체)
+3. 설정에서 한국 시장 토글을 **ON**으로 변경
+
+#### 방법 2: API 호출
+
+```bash
+# 한국 시장 활성화
+curl -X POST http://localhost:8000/api/market/KR/toggle \
+  -H "Content-Type: application/json" \
+  -d '{"enabled": true}'
+
+# 시장 상태 확인
+curl http://localhost:8000/api/market/status
+```
+
+응답 예시:
+```json
+{
+  "markets": [
+    {
+      "market_id": "US",
+      "display_name": "미국 주식",
+      "enabled": true,
+      "currency": "USD",
+      "exchanges": ["NASD", "NYSE", "AMEX"]
+    },
+    {
+      "market_id": "KR",
+      "display_name": "한국 주식",
+      "enabled": true,
+      "currency": "KRW",
+      "exchanges": ["KOSPI", "KOSDAQ"]
+    }
+  ]
+}
+```
+
+### 16.4 한국 시장 데이터 조회
+
+모든 API 엔드포인트에 `market=KR` 파라미터를 추가하면 한국 시장 데이터를 조회할 수 있습니다:
+
+```bash
+# 한국 시장 봇 상태
+curl http://localhost:8000/api/status?market=KR
+
+# 한국 시장 포지션
+curl http://localhost:8000/api/positions?market=KR
+
+# 한국 시장 워치리스트
+curl http://localhost:8000/api/watchlist?market=KR
+
+# 한국 시장 거래 내역
+curl http://localhost:8000/api/trades?market=KR
+```
+
+### 16.5 한국 CANSLIM 스크리닝 기준
+
+한국 시장은 미국 시장과 다른 스크리닝 임계값을 사용합니다:
+
+| 항목 | 미국 (US) | 한국 (KR) | 이유 |
+|------|-----------|-----------|------|
+| 최소 가격 | $10 | ₩5,000 | 동전주 제외 |
+| 최소 거래량 (ADV) | 500,000주 | 50,000주 | 유동성 규모 차이 |
+| RS Rating 기준 | 상위 30% | 상위 30% | 동일 |
+| 시장 필터 | SPY > 200 SMA | KODEX200 > 200 SMA | 각 시장 벤치마크 |
+
+### 16.6 호가 단위 (Tick Size)
+
+한국 시장은 가격대별로 호가 단위가 다릅니다. 봇이 주문 시 자동으로 적용합니다:
+
+| 주가 범위 | 호가 단위 |
+|-----------|----------|
+| ~ ₩2,000 | ₩1 |
+| ₩2,000 ~ ₩5,000 | ₩5 |
+| ₩5,000 ~ ₩20,000 | ₩10 |
+| ₩20,000 ~ ₩50,000 | ₩50 |
+| ₩50,000 ~ ₩200,000 | ₩100 |
+| ₩200,000 ~ ₩500,000 | ₩500 |
+| ₩500,000 ~ | ₩1,000 |
+
+### 16.7 대시보드 시장 선택기
+
+웹 대시보드 사이드바에 시장 선택기가 포함되어 있습니다:
+
+- 🇺🇸 **US** — 미국 시장 데이터만 표시
+- 🇰🇷 **KR** — 한국 시장 데이터만 표시
+- 🌐 **전체** — 모든 시장 데이터 표시
+
+선택한 시장은 대시보드의 모든 페이지(상태, 포지션, 워치리스트, 거래, P&L)에 자동 반영됩니다.
+
+### 16.8 한국 시장 주의사항
+
+1. **pykrx 데이터 캐시**: 유니버스 데이터는 7일간 CSV 캐시됩니다 (`data/kr_universe_cache.csv`)
+2. **장 시간 차이**: 한국 장(09:00~15:30 KST)과 미국 장(23:30~06:00 KST)은 겹치지 않아 동시 운영이 가능합니다
+3. **KIS API 키**: 미국/한국 시장 모두 **같은 한국투자증권 API 키**를 사용합니다 (별도 발급 불필요)
+4. **모의투자 제한**: Paper 모드에서 한국 시장 모의투자 이용 시 한국투자증권 앱에서 **국내 모의투자**도 별도 신청해야 합니다
+5. **DB 마이그레이션**: 봇이 처음 실행될 때 기존 테이블에 `market` 컬럼이 자동 추가됩니다 (기존 데이터는 모두 `US`로 설정)
+
+---
+
 ## 빠른 시작 체크리스트
+
+### 미국 시장 (US)
 
 ```
 [ ] 1. Python 3.11+ 설치
@@ -694,4 +877,14 @@ snowa_tradingbot/
 [ ] 7. 봇 실행 (python -m scripts.run_bot)
 [ ] 8. Telegram에서 /status 확인
 [ ] 9. 2주 이상 Paper 모드 운영 후 Live 전환 검토
+```
+
+### 한국 시장 (KR) 추가
+
+```
+[ ] 1. pykrx 설치 (pip install pykrx)
+[ ] 2. 봇 실행 (미국 시장과 동일한 인스턴스)
+[ ] 3. 대시보드 또는 API로 한국 시장 활성화
+[ ] 4. 대시보드에서 시장 선택기로 KR 데이터 확인
+[ ] 5. Paper 모드에서 충분히 테스트 후 Live 전환
 ```

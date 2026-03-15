@@ -48,16 +48,25 @@ _EXCHANGE_TO_WS: dict[str, str] = {
     "NAS": "NAS",
     "NYS": "NYS",
     "AMS": "AMS",
+    # Korean exchanges (domestic uses ticker directly, no exchange prefix)
+    "KOSPI": "KOSPI",
+    "KOSDAQ": "KOSDAQ",
 }
 
 
 class KISWebSocket:
     """
-    한투 해외주식 실시간 체결가 WebSocket 클라이언트.
+    한투 실시간 체결가 WebSocket 클라이언트 (해외/국내 지원).
 
     사용법:
+        # 해외주식 (US market)
         ws = KISWebSocket(auth, on_price_update)
-        await ws.start({"AAPL": "NASD", "CVE": "NYSE"})
+        await ws.start({"AAPL": "NASD", "CVE": "NYSE"}, market="US")
+
+        # 국내주식 (KR market)
+        ws = KISWebSocket(auth, on_price_update)
+        await ws.start({"005930": "KOSPI", "035720": "KOSDAQ"}, market="KR")
+
         # ... 봇 루프에서 실행
         await ws.stop()
     """
@@ -82,6 +91,8 @@ class KISWebSocket:
         self._first_tick_logged = False
         self._rest_fallback_active = False
         self._approval_invalid = False  # "invalid approval" 에러 감지 플래그
+        self._market: str = "US"  # 시장: "US" (해외) 또는 "KR" (국내)
+        self._tick_count: int = 0  # 수신 틱 카운터
 
     @property
     def status(self) -> WebSocketStatus:
@@ -95,18 +106,37 @@ class KISWebSocket:
     # 메인 루프
     # ────────────────────────────────────────────────────────
 
-    async def start(self, ticker_exchanges: dict[str, str]) -> None:
-        """WebSocket 연결 시작 및 종목 구독."""
+    async def start(self, ticker_exchanges: dict[str, str], market: str = "US") -> None:
+        """WebSocket 연결 시작 및 종목 구독.
+
+        KR 시장은 WS 이벤트 루프 프리즈 이슈로 REST-only 모드로 운영.
+        US 시장은 WS + REST 병행.
+        """
+        self._market = market
         self._ticker_exchange = ticker_exchanges
         self._subscribed_tickers = list(ticker_exchanges.keys())
         self._running = True
         self._reconnect_count = 0
         self._first_tick_logged = False
         self._rest_fallback_active = False
+        self._tick_count = 0
 
-        logger.info("ws_starting", tickers=self._subscribed_tickers)
+        logger.info("ws_starting", tickers=self._subscribed_tickers, market=self._market)
+
+        # KR 시장: WS 연결 시 asyncio 이벤트 루프 프리즈 발생 → REST-only 모드
+        if self._market == "KR" and self._rest_client:
+            logger.info("ws_kr_rest_only_mode", ticker_count=len(self._subscribed_tickers))
+            self._status = WebSocketStatus.CONNECTED  # 상위 로직 호환용
+            await self._rest_fallback_polling()
+            return
 
         rest_fallback_task: asyncio.Task | None = None
+
+        # REST 폴백을 WS와 동시에 즉시 시작 (WS 침묵 대비)
+        if self._rest_client:
+            rest_fallback_task = asyncio.create_task(
+                self._rest_fallback_polling()
+            )
 
         while self._running:
             try:
@@ -120,12 +150,6 @@ class KISWebSocket:
                     except Exception as e:
                         logger.error("ws_approval_key_refresh_failed", error=str(e))
 
-                # WS 연결 성공 → REST 폴백 중지
-                if rest_fallback_task and not rest_fallback_task.done():
-                    rest_fallback_task.cancel()
-                    self._rest_fallback_active = False
-                    logger.info("ws_rest_fallback_stopped", reason="ws_reconnected")
-
                 await self._connect_and_listen()
             except Exception as e:
                 if not self._running:
@@ -136,10 +160,10 @@ class KISWebSocket:
             if not self._running:
                 break
 
-            # 3회 연속 실패 시 REST 폴백 시작
+            # REST 폴백이 죽었으면 재시작
             if (
                 self._rest_client
-                and self._reconnect_count >= 3
+                and (rest_fallback_task is None or rest_fallback_task.done())
                 and not self._rest_fallback_active
             ):
                 rest_fallback_task = asyncio.create_task(
@@ -178,9 +202,11 @@ class KISWebSocket:
 
             logger.info("ws_connected", url=ws_url, reconnect_count=self._reconnect_count)
 
-            # 종목 구독
-            for ticker in self._subscribed_tickers:
+            # 종목 구독 (서버 과부하 방지를 위해 딜레이)
+            for i, ticker in enumerate(self._subscribed_tickers):
                 await self._subscribe(ws, ticker)
+                if i % 5 == 4:  # 5개마다 100ms 대기
+                    await asyncio.sleep(0.1)
 
             # 메시지 수신 루프 + 하트비트 체크
             listener = asyncio.create_task(self._listen(ws))
@@ -204,12 +230,15 @@ class KISWebSocket:
                 heartbeat.cancel()
 
     def _build_tr_key(self, ticker: str) -> str:
+        if self._market == "KR":
+            return ticker  # Korean domestic: just ticker code
         exchange = self._ticker_exchange.get(ticker, "NASD")
         ws_exchange = _EXCHANGE_TO_WS.get(exchange, "NAS")
         return f"D{ws_exchange}{ticker}"
 
     async def _subscribe(self, ws: Any, ticker: str) -> None:
         tr_key = self._build_tr_key(ticker)
+        tr_id = "H0STCNT0" if self._market == "KR" else "HDFSCNT0"
         msg = {
             "header": {
                 "approval_key": self._auth.approval_key,
@@ -219,16 +248,17 @@ class KISWebSocket:
             },
             "body": {
                 "input": {
-                    "tr_id": "HDFSCNT0",
+                    "tr_id": tr_id,
                     "tr_key": tr_key,
                 }
             },
         }
         await ws.send(json.dumps(msg))
-        logger.info("ws_subscribed", ticker=ticker, tr_key=tr_key)
+        logger.info("ws_subscribed", ticker=ticker, tr_key=tr_key, tr_id=tr_id)
 
     async def _unsubscribe(self, ws: Any, ticker: str) -> None:
         tr_key = self._build_tr_key(ticker)
+        tr_id = "H0STCNT0" if self._market == "KR" else "HDFSCNT0"
         msg = {
             "header": {
                 "approval_key": self._auth.approval_key,
@@ -238,13 +268,13 @@ class KISWebSocket:
             },
             "body": {
                 "input": {
-                    "tr_id": "HDFSCNT0",
+                    "tr_id": tr_id,
                     "tr_key": tr_key,
                 }
             },
         }
         await ws.send(json.dumps(msg))
-        logger.debug("ws_unsubscribed", ticker=ticker, tr_key=tr_key)
+        logger.debug("ws_unsubscribed", ticker=ticker, tr_key=tr_key, tr_id=tr_id)
 
     async def _listen(self, ws: Any) -> None:
         try:
@@ -262,10 +292,16 @@ class KISWebSocket:
                     self._handle_json_response(message)
                     continue
 
-                await self._parse_tick_data(message)
+                try:
+                    await self._parse_tick_data(message)
+                except Exception:
+                    logger.warning("ws_tick_callback_error", exc_info=True, message=message[:100])
 
         except ConnectionClosed:
             logger.warning("ws_connection_closed")
+            raise
+        except Exception:
+            logger.error("ws_listen_unexpected_error", exc_info=True)
             raise
 
     def _handle_json_response(self, message: str) -> None:
@@ -297,15 +333,6 @@ class KISWebSocket:
             logger.warning("ws_json_parse_error", message=message[:200])
 
     async def _parse_tick_data(self, message: str) -> None:
-        """HDFSCNT0 필드 (KIS 공식 스펙):
-        RSYM(0) SYMB(1) ZDIV(2) TYMD(3) XYMD(4) XHMS(5) KYMD(6) KHMS(7)
-        OPEN(8) HIGH(9) LOW(10) LAST(11) SIGN(12) DIFF(13) RATE(14)
-        PBID(15) PASK(16) VBID(17) VASK(18) EVOL(19) TVOL(20) TAMT(21)
-        BIVL(22) ASVL(23) STRN(24) MTYP(25)
-
-        주의: fields[0]은 RSYM(실시간종목코드, 예: "DNASAAPL")이고,
-              fields[1]이 SYMB(종목코드, 예: "AAPL")이다.
-        """
         try:
             parts = message.split("|")
             if len(parts) < 4:
@@ -314,43 +341,119 @@ class KISWebSocket:
             tr_id = parts[1]
             data_str = parts[3]
 
-            if tr_id != "HDFSCNT0":
+            if tr_id == "HDFSCNT0":
+                await self._parse_us_tick(data_str, message)
+            elif tr_id == "H0STCNT0":
+                await self._parse_kr_tick(data_str, message)
+            else:
                 return
 
-            fields = data_str.split("^")
-            if len(fields) < 12:
-                return
+        except (ValueError, IndexError) as e:
+            logger.warning("ws_tick_parse_error", error=str(e), message=message[:200])
 
-            # fields[0] = RSYM ("DNASAAPL"), fields[1] = SYMB ("AAPL")
-            rsym = fields[0]
-            ticker = fields[1]
-            current_price = float(fields[11])
+    async def _parse_us_tick(self, data_str: str, raw_message: str) -> None:
+        """HDFSCNT0 해외주식 실시간 체결가 파싱.
 
-            # 안전장치: SYMB이 비어있으면 RSYM에서 추출
-            if not ticker and rsym:
-                # RSYM 형식: "D" + exchange(3) + ticker → 4번째 문자부터 추출
-                ticker = rsym[4:] if len(rsym) > 4 else rsym
+        HDFSCNT0 필드 (KIS 공식 스펙):
+        RSYM(0) SYMB(1) ZDIV(2) TYMD(3) XYMD(4) XHMS(5) KYMD(6) KHMS(7)
+        OPEN(8) HIGH(9) LOW(10) LAST(11) SIGN(12) DIFF(13) RATE(14)
+        PBID(15) PASK(16) VBID(17) VASK(18) EVOL(19) TVOL(20) TAMT(21)
+        BIVL(22) ASVL(23) STRN(24) MTYP(25)
 
-            # 실제 틱 수신 확인 → 재연결 카운터 리셋 (백오프 초기화)
-            if self._reconnect_count > 0:
-                logger.info("ws_reconnect_count_reset", was=self._reconnect_count)
-                self._reconnect_count = 0
+        주의: fields[0]은 RSYM(실시간종목코드, 예: "DNASAAPL")이고,
+              fields[1]이 SYMB(종목코드, 예: "AAPL")이다.
+        """
+        fields = data_str.split("^")
+        if len(fields) < 12:
+            return
+
+        # fields[0] = RSYM ("DNASAAPL"), fields[1] = SYMB ("AAPL")
+        rsym = fields[0]
+        ticker = fields[1]
+        current_price = float(fields[11])
+
+        # 안전장치: SYMB이 비어있으면 RSYM에서 추출
+        if not ticker and rsym:
+            # RSYM 형식: "D" + exchange(3) + ticker → 4번째 문자부터 추출
+            ticker = rsym[4:] if len(rsym) > 4 else rsym
+
+        # 실제 틱 수신 확인 → 재연결 카운터 리셋 (백오프 초기화)
+        if self._reconnect_count > 0:
+            logger.info("ws_reconnect_count_reset", was=self._reconnect_count)
+            self._reconnect_count = 0
+
+        if not self._first_tick_logged:
+            self._first_tick_logged = True
+            logger.info(
+                "ws_first_tick_received",
+                rsym=rsym,
+                ticker=ticker,
+                price=current_price,
+                market="US",
+                field_count=len(fields),
+                raw_preview=raw_message[:200],
+            )
+
+        self._tick_count += 1
+        await self._price_callback(ticker, current_price, time.time())
+
+    async def _parse_kr_tick(self, data_str: str, raw_message: str) -> None:
+        """H0STCNT0 국내주식 실시간 체결가 파싱.
+
+        H0STCNT0 필드 (KIS 공식 스펙):
+        MKSC_SHRN_ISCD(0) 유가증권단축종목코드
+        STCK_CNTG_HOUR(1) 주식체결시간 (HHMMSS)
+        STCK_PRPR(2) 주식현재가
+        PRDY_VRSS_SIGN(3) 전일대비부호
+        PRDY_VRSS(4) 전일대비
+        PRDY_CTRT(5) 전일대비율
+        WGHN_AVRG_STCK_PRC(6) 가중평균주식가격
+        STCK_OPRC(7) 시가
+        STCK_HGPR(8) 고가
+        STCK_LWPR(9) 저가
+        ... (more fields follow)
+        """
+        KR_FIELDS_PER_RECORD = 46
+
+        fields = data_str.split("^")
+        if len(fields) < 10:
+            return
+
+        # 배치 메시지 처리: 여러 종목이 하나의 메시지에 합쳐질 수 있음
+        # parts[2] (record count)가 1보다 크면 46 필드씩 분할
+        records: list[list[str]] = []
+        if len(fields) > KR_FIELDS_PER_RECORD:
+            # 배치 메시지 → 46필드씩 분할
+            for i in range(0, len(fields), KR_FIELDS_PER_RECORD):
+                chunk = fields[i:i + KR_FIELDS_PER_RECORD]
+                if len(chunk) >= 10:
+                    records.append(chunk)
+        else:
+            records.append(fields)
+
+        # 실제 틱 수신 확인 → 재연결 카운터 리셋
+        if self._reconnect_count > 0:
+            logger.info("ws_reconnect_count_reset", was=self._reconnect_count)
+            self._reconnect_count = 0
+
+        for rec in records:
+            ticker = rec[0]
+            current_price = float(rec[2])
 
             if not self._first_tick_logged:
                 self._first_tick_logged = True
                 logger.info(
                     "ws_first_tick_received",
-                    rsym=rsym,
                     ticker=ticker,
                     price=current_price,
+                    market="KR",
                     field_count=len(fields),
-                    raw_preview=message[:200],
+                    record_count=len(records),
+                    raw_preview=raw_message[:200],
                 )
 
+            self._tick_count += 1
             await self._price_callback(ticker, current_price, time.time())
-
-        except (ValueError, IndexError) as e:
-            logger.warning("ws_tick_parse_error", error=str(e), message=message[:200])
 
     # ────────────────────────────────────────────────────────
     # 안정성: 하트비트 & 재연결
@@ -361,6 +464,12 @@ class KISWebSocket:
         while self._running:
             await asyncio.sleep(10)
             elapsed = time.time() - self._last_message_time
+            logger.debug(
+                "ws_heartbeat_check",
+                elapsed=round(elapsed, 1),
+                tick_count=self._tick_count,
+                rest_active=self._rest_fallback_active,
+            )
             if elapsed > WS_HEARTBEAT_TIMEOUT:
                 logger.warning("ws_heartbeat_timeout", elapsed_seconds=elapsed)
                 if self._ws:
@@ -386,45 +495,83 @@ class KISWebSocket:
         await asyncio.sleep(delay)
 
     async def _rest_fallback_polling(self) -> None:
-        """REST API 폴링 폴백 — WebSocket 장애 시 30초 간격 현재가 조회."""
+        """REST API 폴링 — WS와 병행 실행, 항상 가격 데이터 수집.
+
+        WS가 정상이어도 REST polling은 계속 동작하여
+        WS 침묵 시에도 가격 모니터링이 중단되지 않도록 보장.
+        """
         self._rest_fallback_active = True
-        logger.warning(
-            "ws_rest_fallback_started",
+        logger.info(
+            "ws_rest_polling_started",
             interval=WS_REST_FALLBACK_INTERVAL,
             ticker_count=len(self._subscribed_tickers),
+            market=self._market,
         )
 
         try:
-            while self._running and not self.is_connected:
+            # WS 구독과 병행 시 API 경합 방지 (KR REST-only 모드에선 즉시 시작)
+            if self._market != "KR" or not self._rest_fallback_active:
+                await asyncio.sleep(30)
+            self._rest_fallback_active = True
+            logger.info("ws_rest_polling_active", ticker_count=len(self._subscribed_tickers), market=self._market)
+
+            cycle = 0
+            while self._running:
+                cycle += 1
+                ok_count = 0
+                err_count = 0
                 for ticker in self._subscribed_tickers:
-                    if self.is_connected:
+                    if not self._running:
                         break
                     try:
                         exchange = self._ticker_exchange.get(ticker, "NASD")
                         price_data = await self._rest_client.get_current_price(
-                            ticker, exchange
+                            ticker, exchange, market=self._market
                         )
-                        current_price = float(price_data.get("last", 0) or price_data.get("stck_prpr", 0) or 0)
+                        if self._market == "KR":
+                            current_price = float(price_data.get("stck_prpr", 0) or 0)
+                        else:
+                            current_price = float(price_data.get("last", 0) or price_data.get("stck_prpr", 0) or 0)
                         if current_price > 0:
                             await self._price_callback(
                                 ticker, current_price, time.time()
                             )
+                            ok_count += 1
                     except Exception:
-                        logger.debug(
-                            "rest_fallback_tick_failed",
-                            ticker=ticker,
-                            exc_info=True,
-                        )
+                        err_count += 1
+                    # KIS API 초당 제한 방지 (종목간 1초 간격)
+                    await asyncio.sleep(1.0)
+                logger.info(
+                    "rest_polling_cycle_done",
+                    cycle=cycle,
+                    ok=ok_count,
+                    errors=err_count,
+                    tickers=len(self._subscribed_tickers),
+                )
                 await asyncio.sleep(WS_REST_FALLBACK_INTERVAL)
         except asyncio.CancelledError:
             pass
         finally:
             self._rest_fallback_active = False
-            logger.info("ws_rest_fallback_ended")
+            logger.info("ws_rest_polling_ended")
 
     # ────────────────────────────────────────────────────────
     # 종목 관리
     # ────────────────────────────────────────────────────────
+
+    async def unsubscribe_all(self) -> None:
+        """현재 구독 중인 모든 종목 구독 해제 (시장 전환 시 사용)."""
+        if not self._ws or not self.is_connected:
+            self._subscribed_tickers = []
+            self._ticker_exchange = {}
+            return
+
+        for ticker in list(self._subscribed_tickers):
+            await self._unsubscribe(self._ws, ticker)
+
+        self._subscribed_tickers = []
+        self._ticker_exchange = {}
+        logger.info("ws_all_unsubscribed", market=self._market)
 
     async def update_subscriptions(self, new_ticker_exchanges: dict[str, str]) -> None:
         if not self._ws or not self.is_connected:

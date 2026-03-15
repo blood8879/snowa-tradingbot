@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useMemo } from 'react';
 import {
   AreaChart,
   Area,
@@ -12,6 +12,7 @@ import {
   Cell,
 } from 'recharts';
 import { usePnl } from '@/hooks/usePnl';
+import { useMarket } from '@/hooks/useMarket';
 import { PageHeader } from '@/components/ui/PageHeader';
 import { StatCard } from '@/components/ui/StatCard';
 import { DataTable } from '@/components/ui/DataTable';
@@ -19,6 +20,7 @@ import type { Column } from '@/components/ui/DataTable';
 import { PnlText } from '@/components/ui/PnlText';
 import { LoadingSpinner } from '@/components/ui/LoadingSpinner';
 import type { PnlDataPoint } from '@/types/api';
+import { formatCurrency, formatPnlValue, currencySymbol } from '@/lib/format';
 
 const PERIODS = [
   { key: 'daily', label: '일간' },
@@ -32,68 +34,67 @@ const TOOLTIP_STYLE = {
   borderRadius: '8px',
 };
 
-function formatPnl(value: number): string {
-  const sign = value > 0 ? '+' : '';
-  return `${sign}$${value.toLocaleString()}`;
+function getColumns(market: string): Column<PnlDataPoint>[] {
+  return [
+    {
+      key: 'period',
+      header: '기간',
+      render: (row) => <span className="text-slate-100">{row.period}</span>,
+    },
+    {
+      key: 'start',
+      header: '시작',
+      render: (row) => <span className="text-slate-400">{row.start}</span>,
+    },
+    {
+      key: 'end',
+      header: '종료',
+      render: (row) => <span className="text-slate-400">{row.end}</span>,
+    },
+    {
+      key: 'pnl',
+      header: '손익',
+      render: (row) => <PnlText value={row.pnl} prefix={currencySymbol(market)} />,
+    },
+    {
+      key: 'equity',
+      header: '자산',
+      render: (row) => (
+        <span className="text-slate-300">
+          {formatCurrency(row.equity, market)}
+        </span>
+      ),
+    },
+    {
+      key: 'max_drawdown_pct',
+      header: '최대낙폭',
+      render: (row) => (
+        <span className="text-loss">{row.max_drawdown_pct.toFixed(2)}%</span>
+      ),
+    },
+    {
+      key: 'entries',
+      header: '진입',
+      render: (row) => <span className="text-slate-300">{row.entries}</span>,
+    },
+    {
+      key: 'exits',
+      header: '청산',
+      render: (row) => <span className="text-slate-300">{row.exits}</span>,
+    },
+    {
+      key: 'stop_losses',
+      header: '스톱',
+      render: (row) => <span className="text-slate-300">{row.stop_losses}</span>,
+    },
+  ];
 }
 
-const columns: Column<PnlDataPoint>[] = [
-  {
-    key: 'period',
-    header: '기간',
-    render: (row) => <span className="text-slate-100">{row.period}</span>,
-  },
-  {
-    key: 'start',
-    header: '시작',
-    render: (row) => <span className="text-slate-400">{row.start}</span>,
-  },
-  {
-    key: 'end',
-    header: '종료',
-    render: (row) => <span className="text-slate-400">{row.end}</span>,
-  },
-  {
-    key: 'pnl',
-    header: '손익',
-    render: (row) => <PnlText value={row.pnl} />,
-  },
-  {
-    key: 'equity',
-    header: '자산',
-    render: (row) => (
-      <span className="text-slate-300">
-        ${row.equity.toLocaleString()}
-      </span>
-    ),
-  },
-  {
-    key: 'max_drawdown_pct',
-    header: '최대낙폭',
-    render: (row) => (
-      <span className="text-loss">{row.max_drawdown_pct.toFixed(2)}%</span>
-    ),
-  },
-  {
-    key: 'entries',
-    header: '진입',
-    render: (row) => <span className="text-slate-300">{row.entries}</span>,
-  },
-  {
-    key: 'exits',
-    header: '청산',
-    render: (row) => <span className="text-slate-300">{row.exits}</span>,
-  },
-  {
-    key: 'stop_losses',
-    header: '스톱',
-    render: (row) => <span className="text-slate-300">{row.stop_losses}</span>,
-  },
-];
-
 export function PnlPage() {
+  const { market } = useMarket();
   const [period, setPeriod] = useState('daily');
-  const { data, error, isLoading } = usePnl(period);
+  const { data, error, isLoading } = usePnl(period, market);
+  const cols = useMemo(() => getColumns(market), [market]);
 
   if (isLoading) return <LoadingSpinner />;
 
@@ -135,7 +136,7 @@ export function PnlPage() {
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-6">
           <StatCard
             label="총 손익"
-            value={formatPnl(summary.total_pnl)}
+            value={formatPnlValue(summary.total_pnl, market)}
             deltaType={
               summary.total_pnl > 0
                 ? 'positive'
@@ -146,7 +147,7 @@ export function PnlPage() {
           />
           <StatCard
             label="최대 자산"
-            value={`$${summary.max_equity.toLocaleString()}`}
+            value={formatCurrency(summary.max_equity, market)}
           />
           <StatCard
             label="최대 낙폭"
@@ -227,7 +228,7 @@ export function PnlPage() {
       {/* Data Table */}
       <div className="bg-panel rounded-xl border border-slate-700/50 overflow-hidden">
         <DataTable<PnlDataPoint>
-          columns={columns}
+          columns={cols}
           data={points}
           rowKey={(row) => row.period}
           emptyMessage="손익 데이터가 없습니다"

@@ -161,7 +161,7 @@ class PriceCache:
         # Batch insert
         await conn.executemany(
             """
-            INSERT OR IGNORE INTO daily_prices
+            INSERT OR REPLACE INTO daily_prices
                 (ticker, date, open, high, low, close, volume)
             VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
@@ -375,10 +375,138 @@ class PriceCache:
 
         return result
 
+    # ── Bulk Loading (pykrx) ─────────────────────────────────
+
+    async def bulk_load_from_pykrx(
+        self,
+        tickers: list[str],
+        days: int = 300,
+        batch_size: int = 50,
+        delay: float = 1.0,
+    ) -> int:
+        """
+        Bulk download Korean stock OHLCV data using pykrx.
+
+        pykrx is synchronous, so wraps in run_in_executor.
+        Processes tickers in batches to avoid memory issues.
+
+        Args:
+            tickers: List of 6-digit Korean stock codes.
+            days: Number of trading days to fetch.
+            batch_size: Tickers per batch.
+            delay: Delay between batches (seconds).
+
+        Returns:
+            Total number of new records stored.
+        """
+        total_new = 0
+        total_batches = math.ceil(len(tickers) / batch_size) if tickers else 0
+        loop = asyncio.get_event_loop()
+
+        for batch_num in range(total_batches):
+            start = batch_num * batch_size
+            end = start + batch_size
+            batch_tickers = tickers[start:end]
+
+            logger.info(
+                "pykrx_bulk_progress",
+                batch=batch_num + 1,
+                total=total_batches,
+                tickers_in_batch=len(batch_tickers),
+            )
+
+            try:
+                # Run synchronous pykrx download in executor
+                result = await loop.run_in_executor(
+                    None, self._pykrx_download_batch, batch_tickers, days
+                )
+
+                # Store results
+                for ticker, bars in result.items():
+                    new_rows = await self.store_ohlcv(ticker, bars)
+                    total_new += new_rows
+
+            except Exception:
+                logger.exception(
+                    "pykrx_bulk_batch_error",
+                    batch=batch_num + 1,
+                    tickers=batch_tickers[:5],
+                )
+
+            # Rate-limit delay between batches (skip after last batch)
+            if batch_num < total_batches - 1:
+                await asyncio.sleep(delay)
+
+        logger.info(
+            "pykrx_bulk_complete",
+            total_tickers=len(tickers),
+            total_new_records=total_new,
+        )
+        return total_new
+
+    def _pykrx_download_batch(
+        self, tickers: list[str], days: int
+    ) -> dict[str, list[OHLCV]]:
+        """
+        Synchronous pykrx download for a batch of tickers.
+
+        Uses pykrx.stock.get_market_ohlcv_by_date() for each ticker.
+        Runs inside executor.
+
+        Args:
+            tickers: List of Korean stock codes.
+            days: Number of trading days to fetch.
+
+        Returns:
+            Dict mapping ticker → list of OHLCV bars.
+        """
+        from datetime import datetime, timedelta
+
+        try:
+            from pykrx import stock as pykrx_stock
+        except ImportError:
+            logger.error("pykrx_import_error", msg="pykrx not installed")
+            return {}
+
+        end_date = datetime.now().strftime("%Y%m%d")
+        # Use 1.5x factor to account for weekends/holidays
+        start_date = (datetime.now() - timedelta(days=int(days * 1.5))).strftime(
+            "%Y%m%d"
+        )
+
+        result: dict[str, list[OHLCV]] = {}
+
+        for ticker in tickers:
+            try:
+                df = pykrx_stock.get_market_ohlcv_by_date(start_date, end_date, ticker)
+                if df is None or df.empty:
+                    continue
+
+                bars: list[OHLCV] = []
+                for idx, row in df.iterrows():
+                    bars.append(
+                        OHLCV(
+                            date=idx.strftime("%Y-%m-%d"),
+                            open=float(row["시가"]),
+                            high=float(row["고가"]),
+                            low=float(row["저가"]),
+                            close=float(row["종가"]),
+                            volume=int(row["거래량"]),
+                        )
+                    )
+
+                if bars:
+                    result[ticker] = bars
+
+            except Exception:
+                logger.warning("pykrx_ticker_error", ticker=ticker, exc_info=True)
+
+        return result
+
     # ── KIS Gap Fill ─────────────────────────────────────────
 
     async def update_from_kis(
-        self, ticker: str, exchange: str, kis_client: Any
+        self, ticker: str, exchange: str, kis_client: Any, *, market: str = "US"
     ) -> int:
         """
         Fill gaps in daily_prices using KIS REST API.
@@ -388,8 +516,9 @@ class PriceCache:
 
         Args:
             ticker: Stock ticker symbol.
-            exchange: Exchange code (e.g. "NASD", "NYSE").
+            exchange: Exchange code (e.g. "NASD", "NYSE" for US, "KRX" for Korea).
             kis_client: KISRestClient instance (typed as Any to avoid circular imports).
+            market: Market type ("US" or "KR").
 
         Returns:
             Number of new records stored.
@@ -398,7 +527,7 @@ class PriceCache:
 
         try:
             kis_bars: list[OHLCV] = await kis_client.get_daily_prices(
-                ticker, exchange
+                ticker, exchange, market=market
             )
         except Exception:
             logger.exception(

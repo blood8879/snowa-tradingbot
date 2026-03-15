@@ -5,6 +5,8 @@ import { PnlText } from '@/components/ui/PnlText';
 import { LoadingSpinner } from '@/components/ui/LoadingSpinner';
 import { EmptyState } from '@/components/ui/EmptyState';
 import { useDiary } from '@/hooks/useDiary';
+import { useMarket } from '@/hooks/useMarket';
+import { currencySymbol } from '@/lib/format';
 import type { BadgeVariant } from '@/components/ui/Badge';
 import type { DiaryEntry, JournalContext } from '@/types/api';
 
@@ -57,14 +59,14 @@ function statusVariant(status: string): BadgeVariant {
   }
 }
 
-function formatContextValue(key: string, value: unknown): string {
+function formatContextValue(key: string, value: unknown, market: string): string {
   if (typeof value === 'boolean') return value ? '✓' : '✗';
   if (typeof value === 'number') {
     if (key === 'position_size_pct' || key === 'loss_pct' || key === 'pnl_pct') {
       return `${value.toFixed(2)}%`;
     }
     if (key === 'account_equity') {
-      return `$${value.toLocaleString()}`;
+      return `${currencySymbol(market)}${value.toLocaleString()}`;
     }
     if (
       key === 'breakout_level' ||
@@ -76,7 +78,7 @@ function formatContextValue(key: string, value: unknown): string {
       key === 'avg_entry_price' ||
       key === 'exit_level'
     ) {
-      return `$${value.toFixed(2)}`;
+      return `${currencySymbol(market)}${value.toFixed(2)}`;
     }
     if (Number.isInteger(value)) return value.toLocaleString();
     return value.toFixed(2);
@@ -84,7 +86,7 @@ function formatContextValue(key: string, value: unknown): string {
   return String(value);
 }
 
-function ContextGrid({ context }: { context: JournalContext }) {
+function ContextGrid({ context, market }: { context: JournalContext; market: string }) {
   const entries = Object.entries(context).filter(
     ([key, value]) => key !== 'raw' && value != null && key in CONTEXT_LABELS,
   );
@@ -99,7 +101,7 @@ function ContextGrid({ context }: { context: JournalContext }) {
           <div key={key}>
             <p className="text-xs text-slate-500">{CONTEXT_LABELS[key]}</p>
             <p className={`text-sm ${key === 'error' ? 'text-loss' : 'text-slate-300'}`}>
-              {formatContextValue(key, value)}
+              {formatContextValue(key, value, market)}
             </p>
           </div>
         ))}
@@ -108,13 +110,18 @@ function ContextGrid({ context }: { context: JournalContext }) {
   );
 }
 
-function DiaryCard({ entry }: { entry: DiaryEntry }) {
+function DiaryCard({ entry, market }: { entry: DiaryEntry; market: string }) {
   return (
     <div className="bg-panel rounded-xl p-4 border border-slate-700/50 mb-3">
       {/* Header */}
       <div className="flex justify-between items-center mb-3">
         <div className="flex items-center gap-2">
-          <span className="text-lg font-semibold text-slate-100">{entry.ticker}</span>
+          <span className="text-lg font-semibold text-slate-100">
+            {entry.ticker}
+            {entry.name && (
+              <span className="ml-1.5 text-sm font-normal text-slate-400">{entry.name}</span>
+            )}
+          </span>
           <Badge variant={entry.side.toLowerCase() === 'buy' ? 'buy' : 'sell'}>
             {entry.side}
           </Badge>
@@ -126,10 +133,10 @@ function DiaryCard({ entry }: { entry: DiaryEntry }) {
       {/* Info row */}
       <div className="flex flex-wrap gap-6 text-sm mb-3">
         <span className="text-slate-300">
-          주문: {entry.requested_shares}주 × ${entry.requested_price.toFixed(2)}
+          주문: {entry.requested_shares}주 × {currencySymbol(market)}{entry.requested_price.toFixed(2)}
         </span>
         <span className="text-slate-300">
-          체결: {entry.filled_shares}주 × {entry.filled_price?.toFixed(2) ?? '—'}
+          체결: {entry.filled_shares}주 × {entry.filled_price != null ? `${currencySymbol(market)}${entry.filled_price.toFixed(2)}` : '—'}
         </span>
         <span className="text-slate-300 inline-flex items-center gap-1">
           상태: <Badge variant={statusVariant(entry.status)}>{entry.status}</Badge>
@@ -146,11 +153,11 @@ function DiaryCard({ entry }: { entry: DiaryEntry }) {
             </Badge>
           </span>
           {entry.position_avg_entry != null && (
-            <span>평균단가: ${entry.position_avg_entry.toFixed(2)}</span>
+            <span>평균단가: {currencySymbol(market)}{entry.position_avg_entry.toFixed(2)}</span>
           )}
           {entry.position_pnl != null && (
             <span className="inline-flex items-center gap-1">
-              손익: <PnlText value={entry.position_pnl} />
+              손익: <PnlText value={entry.position_pnl} prefix={currencySymbol(market)} />
             </span>
           )}
           {entry.close_reason && <span>청산사유: {entry.close_reason}</span>}
@@ -158,15 +165,16 @@ function DiaryCard({ entry }: { entry: DiaryEntry }) {
       )}
 
       {/* Context */}
-      {entry.context && <ContextGrid context={entry.context} />}
+      {entry.context && <ContextGrid context={entry.context} market={market} />}
     </div>
   );
 }
 
 export function DiaryPage() {
+  const { market } = useMarket();
   const [ticker, setTicker] = useState<string | undefined>(undefined);
   const [offset, setOffset] = useState(0);
-  const { data, isLoading, error } = useDiary(ticker, PAGE_SIZE, offset);
+  const { data, isLoading, error } = useDiary(ticker, PAGE_SIZE, offset, market);
 
   useEffect(() => {
     setOffset(0);
@@ -215,7 +223,7 @@ export function DiaryPage() {
       ) : (
         <>
           {entries.map((entry) => (
-            <DiaryCard key={entry.order_id} entry={entry} />
+            <DiaryCard key={entry.order_id} entry={entry} market={market} />
           ))}
 
           {/* Pagination */}

@@ -26,6 +26,7 @@ async def get_pnl(
         default="daily",
         description="Aggregation period: daily, weekly, or monthly",
     ),
+    market: str = Query(default="US", description="Market filter"),
     db: Database = Depends(get_db),
     account_mgr: AccountManager | None = Depends(get_account_manager),
 ) -> dict:
@@ -53,9 +54,11 @@ async def get_pnl(
                 SUM(exits_count) AS exits,
                 SUM(stop_losses_count) AS stop_losses
             FROM daily_log
+            WHERE market = ?
             GROUP BY strftime('%Y-W%W', date)
             ORDER BY period_start ASC
-            """
+            """,
+            (market,)
         )
     elif period == "monthly":
         cursor = await db.conn.execute(
@@ -71,9 +74,11 @@ async def get_pnl(
                 SUM(exits_count) AS exits,
                 SUM(stop_losses_count) AS stop_losses
             FROM daily_log
+            WHERE market = ?
             GROUP BY strftime('%Y-%m', date)
             ORDER BY period_start ASC
-            """
+            """,
+            (market,)
         )
     else:
         # Daily (default)
@@ -90,8 +95,10 @@ async def get_pnl(
                 exits_count AS exits,
                 stop_losses_count AS stop_losses
             FROM daily_log
+            WHERE market = ?
             ORDER BY date ASC
-            """
+            """,
+            (market,)
         )
 
     rows = await cursor.fetchall()
@@ -114,7 +121,7 @@ async def get_pnl(
     # ── 실시간 브로커 equity로 현재일/현재 기간 보정 ──
     if account_mgr is not None:
         try:
-            info = await account_mgr.get_account_info()
+            info = await account_mgr.get_account_info(market=market)
             live_equity = info.total_equity
             if live_equity > 0:
                 today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -123,7 +130,8 @@ async def get_pnl(
                 else:
                     # weekly/monthly: daily_log의 마지막 기록 equity로 오늘 delta 계산
                     prev_cursor = await db.conn.execute(
-                        "SELECT account_equity FROM daily_log ORDER BY date DESC LIMIT 1"
+                        "SELECT account_equity FROM daily_log WHERE market = ? ORDER BY date DESC LIMIT 1",
+                        (market,),
                     )
                     prev_row = await prev_cursor.fetchone()
                     last_recorded = prev_row[0] if prev_row and prev_row[0] else 0.0
@@ -140,6 +148,7 @@ async def get_pnl(
 
     return {
         "period": period,
+        "market": market,
         "data": data_points,
         "summary": {
             "total_pnl": total_pnl,

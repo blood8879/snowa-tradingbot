@@ -26,6 +26,7 @@ from config.constants import (
     STOP_RETRY_DELAY_SECONDS,
     STOP_SELL_BUFFER_PCT,
 )
+from config.market_config import adjust_price_to_tick, KR_TICK_SIZE_TABLE
 from core.database import Database
 from core.models import CloseReason, Order, OrderSide, OrderStatus, OrderType
 
@@ -69,6 +70,8 @@ class OrderExecutor:
         shares: int,
         order_type: OrderType = OrderType.ENTRY,
         notes: str | None = None,
+        *,
+        market: str = "US",
     ) -> Order:
         """
         돌파 진입 매수 주문.
@@ -76,7 +79,12 @@ class OrderExecutor:
         현재가가 이미 돌파가를 넘었으므로, 체결 확보를 위해
         현재가 + BUY_BUFFER_PCT(0.3%)로 지정가 매수.
         """
-        buy_price = round(current_price * (1 + BUY_BUFFER_PCT), 2)
+        if market == "KR":
+            buy_price = int(adjust_price_to_tick(
+                current_price * (1 + BUY_BUFFER_PCT), KR_TICK_SIZE_TABLE
+            ))
+        else:
+            buy_price = round(current_price * (1 + BUY_BUFFER_PCT), 2)
 
         order = Order(
             ticker=ticker,
@@ -89,6 +97,7 @@ class OrderExecutor:
             updated_at=_now_iso(),
             notes=notes,
         )
+        order._market = market
 
         try:
             result = await self._rest.place_order(
@@ -97,6 +106,7 @@ class OrderExecutor:
                 side="BUY",
                 quantity=shares,
                 price=buy_price,
+                market=market,
             )
             order.broker_order_id = result.get("ODNO", "")
             order.status = OrderStatus.SUBMITTED
@@ -131,6 +141,8 @@ class OrderExecutor:
         current_price: float,
         shares: int,
         notes: str | None = None,
+        *,
+        market: str = "US",
     ) -> Order:
         """
         손절 매도 주문.
@@ -151,9 +163,15 @@ class OrderExecutor:
             updated_at=_now_iso(),
             notes=notes,
         )
+        order._market = market
 
         for attempt in range(1, STOP_MAX_RETRIES + 1):
-            sell_price = round(current_price * (1 - STOP_SELL_BUFFER_PCT), 2)
+            if market == "KR":
+                sell_price = int(adjust_price_to_tick(
+                    current_price * (1 - STOP_SELL_BUFFER_PCT), KR_TICK_SIZE_TABLE
+                ))
+            else:
+                sell_price = round(current_price * (1 - STOP_SELL_BUFFER_PCT), 2)
             order.requested_price = sell_price
 
             try:
@@ -163,11 +181,12 @@ class OrderExecutor:
                     side="SELL",
                     quantity=shares,
                     price=sell_price,
+                    market=market,
                 )
                 order.broker_order_id = result.get("ODNO", "")
-                order.status = OrderStatus.SUBMITTED
                 order.updated_at = _now_iso()
 
+                order.status = OrderStatus.SUBMITTED
                 logger.warning(
                     "order_stop_loss_submitted",
                     ticker=ticker,
@@ -185,12 +204,28 @@ class OrderExecutor:
                     attempt=attempt,
                     error=str(e),
                 )
+                # 40240000: 모의투자 잔고내역이 없습니다
+                # → 브로커에 잔고 없음 = 이전 매도 주문이 이미 체결된 것
+                # 재시도 무의미, 즉시 중단하고 포지션 강제 청산 필요
+                if e.msg_cd == "40240000":
+                    order.status = OrderStatus.FAILED
+                    order.notes = _merge_error_note(order.notes, "NO_BROKER_BALANCE")
+                    order.updated_at = _now_iso()
+                    logger.warning(
+                        "stop_loss_no_broker_balance",
+                        ticker=ticker,
+                        msg="브로커 잔고 없음 → 이전 주문이 이미 체결된 것으로 판단, 포지션 강제 청산 필요",
+                    )
+                    break
                 if attempt < STOP_MAX_RETRIES:
                     await asyncio.sleep(STOP_RETRY_DELAY_SECONDS)
                     # 재시도 시 최신 가격으로 갱신
                     try:
-                        price_data = await self._rest.get_current_price(ticker, exchange)
-                        current_price = float(price_data.get("last", current_price))
+                        price_data = await self._rest.get_current_price(ticker, exchange, market=market)
+                        if market == "KR":
+                            current_price = float(price_data.get("stck_prpr", current_price))
+                        else:
+                            current_price = float(price_data.get("last", current_price))
                     except Exception:
                         pass  # 가격 조회 실패 시 기존 가격 사용
                 else:
@@ -213,50 +248,92 @@ class OrderExecutor:
         shares: int,
         order_type: OrderType = OrderType.EXIT,
         notes: str | None = None,
+        *,
+        market: str = "US",
     ) -> Order:
         """
         Donchian 청산 또는 일반 청산 매도.
         손절과 달리 급박하지 않으므로 버퍼를 작게.
+        최대 2회 재시도 (장 마감 직전 API 과부하 대비).
         """
-        sell_price = round(current_price * (1 - STOP_SELL_BUFFER_PCT / 2), 2)
-
         order = Order(
             ticker=ticker,
             side=OrderSide.SELL,
             order_type=order_type,
             requested_shares=shares,
-            requested_price=sell_price,
+            requested_price=0.0,
             status=OrderStatus.PENDING,
             created_at=_now_iso(),
             updated_at=_now_iso(),
             notes=notes,
         )
+        order._market = market
 
-        try:
-            result = await self._rest.place_order(
-                ticker=ticker,
-                exchange=exchange,
-                side="SELL",
-                quantity=shares,
-                price=sell_price,
-            )
-            order.broker_order_id = result.get("ODNO", "")
-            order.status = OrderStatus.SUBMITTED
-            order.updated_at = _now_iso()
+        max_retries = 2
+        for attempt in range(1, max_retries + 1):
+            if market == "KR":
+                sell_price = int(adjust_price_to_tick(
+                    current_price * (1 - STOP_SELL_BUFFER_PCT / 2), KR_TICK_SIZE_TABLE
+                ))
+            else:
+                sell_price = round(current_price * (1 - STOP_SELL_BUFFER_PCT / 2), 2)
+            order.requested_price = sell_price
 
-            logger.info(
-                "order_exit_submitted",
-                ticker=ticker,
-                shares=shares,
-                price=sell_price,
-                order_type=order_type.value,
-            )
+            try:
+                result = await self._rest.place_order(
+                    ticker=ticker,
+                    exchange=exchange,
+                    side="SELL",
+                    quantity=shares,
+                    price=sell_price,
+                    market=market,
+                )
+                order.broker_order_id = result.get("ODNO", "")
+                order.updated_at = _now_iso()
 
-        except KISAPIError as e:
-            order.status = OrderStatus.FAILED
-            order.notes = _merge_error_note(order.notes, str(e))
-            order.updated_at = _now_iso()
-            logger.error("order_exit_failed", ticker=ticker, error=str(e))
+                order.status = OrderStatus.SUBMITTED
+                logger.info(
+                    "order_exit_submitted",
+                    ticker=ticker,
+                    shares=shares,
+                    price=sell_price,
+                    order_type=order_type.value,
+                    attempt=attempt,
+                )
+                break
+
+            except KISAPIError as e:
+                logger.error(
+                    "order_exit_attempt_failed",
+                    ticker=ticker,
+                    attempt=attempt,
+                    error=str(e),
+                )
+                # 40240000: 브로커 잔고 없음 = 이미 체결됨
+                if e.msg_cd == "40240000":
+                    order.status = OrderStatus.FAILED
+                    order.notes = _merge_error_note(order.notes, "NO_BROKER_BALANCE")
+                    order.updated_at = _now_iso()
+                    logger.warning(
+                        "exit_no_broker_balance",
+                        ticker=ticker,
+                        msg="브로커 잔고 없음 → 이전 주문이 이미 체결된 것으로 판단",
+                    )
+                    break
+                if attempt < max_retries:
+                    await asyncio.sleep(STOP_RETRY_DELAY_SECONDS)
+                    try:
+                        price_data = await self._rest.get_current_price(ticker, exchange, market=market)
+                        if market == "KR":
+                            current_price = float(price_data.get("stck_prpr", current_price))
+                        else:
+                            current_price = float(price_data.get("last", current_price))
+                    except Exception:
+                        pass
+                else:
+                    order.status = OrderStatus.FAILED
+                    order.notes = _merge_error_note(order.notes, f"청산 주문 {max_retries}회 재시도 실패: {e}")
+                    order.updated_at = _now_iso()
 
         await self._save_order(order)
         return order
@@ -311,7 +388,7 @@ class OrderExecutor:
                 SELECT id, broker_order_id, ticker, side, order_type,
                        requested_shares, requested_price,
                        filled_shares, filled_price,
-                       status, created_at, updated_at, filled_at, notes
+                       status, created_at, updated_at, filled_at, notes, market
                 FROM orders
                 WHERE status IN (?, ?)
                 """,
@@ -340,27 +417,151 @@ class OrderExecutor:
                     filled_at=row[12],
                     notes=row[13],
                 )
+                order._market = row[14] if row[14] else "US"
                 if order.broker_order_id:
-                    pending_orders[order.broker_order_id] = order
+                    # KIS API 체결조회는 odno 선행 0을 제거하여 반환 (예: "41291")
+                    # 주문 제출 응답은 선행 0 포함 (예: "0000041291")
+                    # 양쪽 모두 정규화하여 매칭
+                    normalized_key = order.broker_order_id.lstrip("0") or "0"
+                    pending_orders[normalized_key] = order
 
             if not pending_orders:
                 return filled_orders
 
-            fills = await self._rest.get_filled_orders()
+            # Determine which markets have pending orders
+            markets_needed = set()
+            for order in pending_orders.values():
+                markets_needed.add(getattr(order, '_market', 'US'))
 
-            if not fills:
-                return filled_orders
+            # 주문 생성일 기준으로 조회 날짜 결정
+            # 미국 장은 23:30~06:00 KST로 자정을 걸치므로, datetime.now()가 아닌
+            # 실제 주문 생성일을 사용해야 체결 조회가 정확함
+            order_dates: set[str] = set()
+            for order in pending_orders.values():
+                try:
+                    created = datetime.fromisoformat(order.created_at)
+                    order_dates.add(created.strftime("%Y%m%d"))
+                except (ValueError, TypeError):
+                    pass
+            if not order_dates:
+                order_dates.add(datetime.now().strftime("%Y%m%d"))
+            start_date = min(order_dates)
+            end_date = max(order_dates)
+            # 오늘 날짜도 포함 (당일 주문이 있을 수 있으므로)
+            today_str = datetime.now().strftime("%Y%m%d")
+            if today_str > end_date:
+                end_date = today_str
 
-            for fill in fills:
-                order_no = fill.get("odno", "")
-                if not order_no or order_no not in pending_orders:
+            # Fetch fills from each market
+            all_fills = []
+            for mkt in markets_needed:
+                try:
+                    fills = await self._rest.get_filled_orders(
+                        start_date, end_date, market=mkt,
+                    )
+                    for f in fills:
+                        f['_market'] = mkt
+                    all_fills.extend(fills)
+                except Exception:
+                    logger.warning("filled_query_market_failed", market=mkt, exc_info=True)
+
+            # ── KR Paper 모의투자 잔고 기반 체결 확인 fallback ──
+            # VTTC8001R (KR 체결내역 조회)가 Paper에서 빈 결과 반환하므로,
+            # get_balance()로 브로커 잔고를 조회하여 체결 여부를 추론.
+            if "KR" in markets_needed and self._rest._settings.is_paper:
+                kr_pending = {
+                    k: v for k, v in pending_orders.items()
+                    if getattr(v, '_market', 'US') == 'KR'
+                    and v.status != OrderStatus.FILLED
+                }
+                if kr_pending:
+                    try:
+                        kr_balance = await self._rest.get_balance(market="KR")
+                        broker_holdings: dict[str, int] = {}
+                        for bp in kr_balance.get("positions", []):
+                            pdno = bp.get("pdno", "")
+                            qty = int(float(bp.get("hldg_qty", 0)))
+                            if pdno and qty > 0:
+                                broker_holdings[pdno] = qty
+
+                        # DB 포지션 현재 수량 조회 (sync_positions 이중 반영 방지)
+                        db_pos_shares: dict[str, int] = {}
+                        if self._position_mgr:
+                            for order_key, order in kr_pending.items():
+                                pos = await self._position_mgr.get_position(order.ticker)
+                                if pos:
+                                    db_pos_shares[order.ticker] = pos.total_shares
+
+                        for order_key, order in list(kr_pending.items()):
+                            broker_qty = broker_holdings.get(order.ticker, 0)
+                            if broker_qty <= 0:
+                                if order.side == OrderSide.SELL:
+                                    # 매도 후 잔고 0 = 체결
+                                    pass
+                                else:
+                                    continue
+
+                            if order.side == OrderSide.BUY:
+                                fill_qty = order.requested_shares
+                                fill_price = order.requested_price
+                            else:
+                                fill_qty = order.requested_shares
+                                fill_price = order.requested_price
+
+                            old_filled = order.filled_shares
+                            order.filled_shares = fill_qty
+                            order.filled_price = fill_price
+                            order.status = OrderStatus.FILLED
+                            order.filled_at = _now_iso()
+                            order.updated_at = _now_iso()
+                            filled_orders.append(order)
+                            await self._save_order(order)
+
+                            logger.info(
+                                "order_filled_kr_paper_balance_fallback",
+                                order_id=order.id,
+                                broker_order_id=order_key,
+                                ticker=order.ticker,
+                                side=order.side.value,
+                                filled_shares=fill_qty,
+                                filled_price=fill_price,
+                                broker_qty=broker_qty,
+                            )
+
+                            # 항상 _handle_fill_position 호출 — 유닛 기록에 필요
+                            # BUY: sync_positions가 먼저 실행되어도 유닛 추적을 위해 호출 필수
+                            # SELL: 포지션 청산/감소 처리 필수
+                            if self._position_mgr:
+                                await self._handle_fill_position(order, old_filled)
+                    except Exception:
+                        logger.warning("kr_paper_balance_fallback_failed", exc_info=True)
+
+            if not all_fills:
+                # KR paper fallback으로 이미 처리된 주문이 있을 수 있으므로
+                # filled_orders가 비어있을 때만 early return
+                if not filled_orders:
+                    return filled_orders
+                # fallback으로 체결된 것이 있으면 아래 만료 로직도 실행
+                all_fills = []  # 빈 리스트로 두고 만료 로직으로 진행
+
+            for fill in all_fills:
+                raw_odno = fill.get("odno", "")
+                if not raw_odno:
+                    continue
+                order_no = raw_odno.lstrip("0") or "0"
+                if order_no not in pending_orders:
                     continue
 
                 order = pending_orders[order_no]
+                fill_market = fill.get('_market', 'US')
 
-                # KIS 해외주식 체결 필드: ft_ccld_qty(체결수량), ft_ccld_unpr3(체결단가)
-                fill_qty = int(float(fill.get("ft_ccld_qty", 0)))
-                fill_price = float(fill.get("ft_ccld_unpr3", 0))
+                # KR vs US have different field names for fill quantity/price
+                if fill_market == "KR":
+                    fill_qty = int(float(fill.get("tot_ccld_qty", 0)))
+                    fill_price = float(fill.get("avg_prvs", 0))
+                else:
+                    fill_qty = int(float(fill.get("ft_ccld_qty", 0)))
+                    fill_price = float(fill.get("ft_ccld_unpr3", 0))
 
                 if fill_qty <= 0:
                     continue
@@ -406,6 +607,39 @@ class OrderExecutor:
                 if self._position_mgr:
                     await self._handle_fill_position(order, old_filled)
 
+            # ── 오래된 미체결 주문 자동 정리 ──
+            # get_filled_orders()는 오늘 날짜만 조회하므로, 전날 주문은 매칭 불가.
+            # 2시간(7200초) 이상 된 SUBMITTED 주문은 자동 정리하여 무한 폴링 방지.
+            # sync_positions가 다음 시작 시 포지션 수량을 보정해줌.
+            now = datetime.now(timezone.utc)
+            for order in pending_orders.values():
+                if order.status == OrderStatus.FILLED:
+                    continue  # 이미 위에서 체결 처리됨
+                try:
+                    created = datetime.fromisoformat(order.created_at)
+                    age_s = (now - created).total_seconds()
+                except (ValueError, TypeError):
+                    age_s = 0
+
+                # 매도 주문(STOP_LOSS/EXIT)은 30분, 매수 주문은 2시간 후 만료
+                expire_seconds = 1800 if order.side == OrderSide.SELL else 7200
+                if age_s > expire_seconds and (order.filled_shares or 0) == 0:
+                    order.status = OrderStatus.FAILED
+                    order.updated_at = _now_iso()
+                    order.notes = json.dumps({
+                        **(json.loads(order.notes) if order.notes else {}),
+                        "resolved_by": "auto_expired_fill_check_timeout",
+                        "age_hours": round(age_s / 3600, 1),
+                    })
+                    await self._save_order(order)
+                    logger.warning(
+                        "old_submitted_order_expired",
+                        order_id=order.id,
+                        ticker=order.ticker,
+                        broker_order_id=order.broker_order_id,
+                        age_hours=round(age_s / 3600, 1),
+                    )
+
         except Exception as e:
             logger.error("check_fills_failed", error=str(e))
 
@@ -449,20 +683,33 @@ class OrderExecutor:
                             n_value=n_value,
                         )
 
-                    await self._position_mgr.open_position(
-                        ticker=order.ticker,
-                        system=notes.get("system", "S1"),
-                        entry_price=fill_price,
-                        shares=fill_shares,
-                        n_value=n_value,
-                        stop_price=stop_price,
-                    )
-                    logger.info(
-                        "fill_position_opened",
-                        ticker=order.ticker,
-                        price=fill_price,
-                        shares=fill_shares,
-                    )
+                    # 포지션이 이미 존재하는지 확인 (sync_positions가 먼저 생성했을 수 있음)
+                    existing_pos = await self._position_mgr.get_position(order.ticker)
+                    if existing_pos:
+                        logger.info(
+                            "fill_entry_position_already_exists",
+                            ticker=order.ticker,
+                            position_id=existing_pos.id,
+                            msg="sync_positions가 이미 생성함 — 유닛 확인만 수행",
+                        )
+                    else:
+                        order_market = getattr(order, '_market', 'US')
+                        await self._position_mgr.open_position(
+                            ticker=order.ticker,
+                            system=notes.get("system", "S1"),
+                            entry_price=fill_price,
+                            shares=fill_shares,
+                            n_value=n_value,
+                            stop_price=stop_price,
+                            market=order_market,
+                        )
+                        logger.info(
+                            "fill_position_opened",
+                            ticker=order.ticker,
+                            price=fill_price,
+                            shares=fill_shares,
+                            market=order_market,
+                        )
                 else:
                     await self._position_mgr.update_entry_fill(
                         position_id=position.id,
@@ -572,8 +819,8 @@ class OrderExecutor:
                     broker_order_id, ticker, side, order_type,
                     requested_shares, requested_price,
                     filled_shares, filled_price,
-                    status, created_at, updated_at, filled_at, notes
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    status, created_at, updated_at, filled_at, notes, market
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     order.broker_order_id,
@@ -589,6 +836,7 @@ class OrderExecutor:
                     order.updated_at,
                     order.filled_at,
                     order.notes,
+                    getattr(order, '_market', 'US'),
                 ),
             )
             order.id = cursor.lastrowid

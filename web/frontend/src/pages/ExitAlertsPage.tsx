@@ -4,6 +4,8 @@ import { StatCard } from '@/components/ui/StatCard';
 import { Badge } from '@/components/ui/Badge';
 import { LoadingSpinner } from '@/components/ui/LoadingSpinner';
 import { useExitAlerts } from '@/hooks/useExitAlerts';
+import { useMarket } from '@/hooks/useMarket';
+import { formatPrice } from '@/lib/format';
 import type { BadgeVariant } from '@/components/ui/Badge';
 import type { ExitAlert } from '@/types/api';
 
@@ -11,11 +13,6 @@ interface ExitAlertColumn {
   key: string;
   header: string;
   render: (row: ExitAlert) => React.ReactNode;
-}
-
-function formatPrice(value: number | null): string {
-  if (value == null) return '-';
-  return `$${value.toFixed(2)}`;
 }
 
 function getExitLevelBadgeVariant(level: ExitAlert['exit_level']): BadgeVariant {
@@ -62,13 +59,18 @@ function getProximityColor(level: ExitAlert['exit_level']): string {
   }
 }
 
-function getColumns(): ExitAlertColumn[] {
+function getColumns(market: string): ExitAlertColumn[] {
   return [
     {
       key: 'ticker',
       header: '종목',
       render: (row) => (
-        <span className="font-semibold text-slate-100">{row.ticker}</span>
+        <span className="font-semibold text-slate-100">
+          {row.ticker}
+          {row.name && (
+            <span className="ml-1.5 text-xs font-normal text-slate-400">{row.name}</span>
+          )}
+        </span>
       ),
     },
     {
@@ -76,7 +78,7 @@ function getColumns(): ExitAlertColumn[] {
       header: '매입가',
       render: (row) => (
         <span className="text-slate-300 tabular-nums">
-          {formatPrice(row.entry_price)}
+          {formatPrice(row.entry_price, market)}
         </span>
       ),
     },
@@ -85,7 +87,7 @@ function getColumns(): ExitAlertColumn[] {
       header: '현재가',
       render: (row) => (
         <span className="text-slate-200 tabular-nums font-medium">
-          {formatPrice(row.current_price)}
+          {formatPrice(row.current_price, market)}
         </span>
       ),
     },
@@ -114,7 +116,7 @@ function getColumns(): ExitAlertColumn[] {
       header: 'S1 청산가',
       render: (row) => (
         <span className="text-slate-300 tabular-nums">
-          {formatPrice(row.donchian_lower_10)}
+          {formatPrice(row.donchian_lower_10, market)}
         </span>
       ),
     },
@@ -123,7 +125,7 @@ function getColumns(): ExitAlertColumn[] {
       header: 'S2 청산가',
       render: (row) => (
         <span className="text-slate-300 tabular-nums">
-          {formatPrice(row.donchian_lower_20)}
+          {formatPrice(row.donchian_lower_20, market)}
         </span>
       ),
     },
@@ -149,9 +151,10 @@ function getColumns(): ExitAlertColumn[] {
 }
 
 export function ExitAlertsPage() {
-  const { data, isLoading, error } = useExitAlerts();
+  const { market } = useMarket();
+  const { data, isLoading, error } = useExitAlerts(market);
 
-  const columns = useMemo(() => getColumns(), []);
+  const columns = useMemo(() => getColumns(market), [market]);
 
   const alerts = data?.alerts ?? [];
 

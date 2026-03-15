@@ -19,6 +19,8 @@ import structlog
 
 from core.database import Database
 from data.universe import UniverseManager
+from data.universe_kr import KRUniverseManager
+from config.market_config import get_market_config
 from data.price_cache import PriceCache
 from data.market_data import MarketDataProvider
 from data.fundamental_data import FundamentalDataManager
@@ -26,6 +28,11 @@ from screening.rs_rating import RSRatingCalculator
 from screening.canslim_screener import CANSLIMResult, CANSLIMScreener
 from screening.minervini_template import MinerviniTemplate
 from screening.custom_composite import CompositeScoreCalculator
+
+# DART API key for Korean financial data
+import os
+
+DART_API_KEY = os.environ.get("DART_API_KEY", "a9a83a37044c92dda80876d98c108d112c89136b")
 
 logger = structlog.get_logger(__name__)
 
@@ -39,7 +46,7 @@ class WatchlistManager:
     # ── Full Screening Pipeline ──────────────────────────────
 
     async def run_full_screening(
-        self, tickers: list[str] | None = None
+        self, tickers: list[str] | None = None, *, market: str = "US"
     ) -> list[dict]:
         """Run the complete CANSLIM + Minervini screening pipeline.
 
@@ -56,6 +63,7 @@ class WatchlistManager:
         Args:
             tickers: Optional explicit list of tickers. If None,
                      loads from UniverseManager (non-ETF only).
+            market: Market identifier ("US" or "KR"). Default: "US".
 
         Returns:
             List of dicts with ticker, scores, and pass/fail status.
@@ -63,13 +71,21 @@ class WatchlistManager:
         now = datetime.now().isoformat(timespec="seconds")
 
         # ── Step 1: Load tickers ─────────────────────────────
-        universe = UniverseManager()
-        await universe.load_universe()
-        if tickers is None:
-            tradeable = universe.filter_tradeable()
-            tickers = [s.ticker for s in tradeable]
+        if market == "KR":
+            kr_universe = KRUniverseManager()
+            await kr_universe.load_universe()
+            if tickers is None:
+                tradeable = kr_universe.filter_tradeable()
+                tickers = [s.ticker for s in tradeable]
+            universe = kr_universe  # Use KR universe for exchange lookup
+        else:
+            universe = UniverseManager()
+            await universe.load_universe()
+            if tickers is None:
+                tradeable = universe.filter_tradeable()
+                tickers = [s.ticker for s in tradeable]
 
-        logger.info("screening_started", total_tickers=len(tickers))
+        logger.info("screening_started", total_tickers=len(tickers), market=market)
 
         # ── Step 2: Initialize components ────────────────────
         price_cache = PriceCache(self._db)
@@ -81,17 +97,60 @@ class WatchlistManager:
         composite_calc = CompositeScoreCalculator(fundamental_data, market_data)
 
         # ── Step 3: Calculate RS Ratings ─────────────────────
-        rs_ratings = await rs_calc.calculate_universe(tickers)
+        rs_ratings = await rs_calc.calculate_universe(tickers, market=market)
 
         logger.info(
             "rs_ratings_calculated",
             total_tickers=len(tickers),
             rated=len(rs_ratings),
+            market=market,
         )
+
+        # ── Step 3.5: For KR market, pre-fetch DART financials ──
+        if market == "KR" and DART_API_KEY:
+            try:
+                from data.dart_financial import DartFinancialFetcher
+                from config.constants import CANSLIM_MIN_RS_RATING
+
+                # Pre-filter: only fetch DART data for stocks likely to pass S+L
+                # RS >= 80 (L filter threshold) to minimize API calls
+                dart_candidates = [
+                    t for t in tickers
+                    if rs_ratings.get(t, 0) >= CANSLIM_MIN_RS_RATING
+                ]
+
+                logger.info(
+                    "dart_prefetch_start",
+                    candidates=len(dart_candidates),
+                    total_tickers=len(tickers),
+                    market=market,
+                )
+
+                dart = DartFinancialFetcher(
+                    api_key=DART_API_KEY,
+                    cache_dir=str(self._db.db_path.parent) if hasattr(self._db, 'db_path') else "data",
+                )
+                await dart.load_corp_codes()
+                dart_records = await dart.bulk_fetch_and_store(
+                    dart_candidates, self._db,
+                )
+
+                logger.info(
+                    "dart_prefetch_complete",
+                    candidates=len(dart_candidates),
+                    records=dart_records,
+                    market=market,
+                )
+            except Exception:
+                logger.warning(
+                    "dart_prefetch_failed",
+                    market=market,
+                    exc_info=True,
+                )
 
         # ── Step 4: Run CANSLIM screening (core filters: C/A/S/L) ──
         canslim_results = await screener.screen_universe(
-            tickers, rs_ratings, core_only=True,
+            tickers, rs_ratings, core_only=True, market=market,
         )
 
         # ── Step 5: Filter to passed tickers ─────────────────
@@ -102,6 +161,7 @@ class WatchlistManager:
             "canslim_screening_complete",
             total_screened=len(canslim_results),
             passed=len(canslim_passed),
+            market=market,
         )
 
         # ── Step 6: Run Minervini template ───────────────────
@@ -109,13 +169,14 @@ class WatchlistManager:
         for ticker in canslim_passed_tickers:
             try:
                 rs = rs_ratings.get(ticker)
-                result = await template.check(ticker, rs_rating=rs)
+                result = await template.check(ticker, rs_rating=rs, market=market)
                 if result.passed_all:
                     minervini_passed_tickers.append(ticker)
             except Exception:
                 logger.warning(
                     "minervini_check_failed",
                     ticker=ticker,
+                    market=market,
                     exc_info=True,
                 )
 
@@ -123,6 +184,7 @@ class WatchlistManager:
             "minervini_filtering_complete",
             canslim_passed=len(canslim_passed_tickers),
             minervini_passed=len(minervini_passed_tickers),
+            market=market,
         )
 
         # ── Step 7: Calculate composite scores ───────────────
@@ -137,6 +199,7 @@ class WatchlistManager:
                 logger.warning(
                     "composite_score_failed",
                     ticker=ticker,
+                    market=market,
                     exc_info=True,
                 )
 
@@ -177,7 +240,7 @@ class WatchlistManager:
             sector = None
             industry = None
             market_cap = None
-            # Exchange 폴백: universe → DB 기존값 → "NASD"
+            # Exchange 폴백: universe → DB 기존값 → market 기반 기본값
             exchange = None
             if universe and universe.get_stock(ticker):
                 exchange = universe.get_exchange(ticker)
@@ -193,7 +256,7 @@ class WatchlistManager:
                 except Exception:
                     pass
             if exchange is None:
-                exchange = "NASD"
+                exchange = "KOSPI" if market == "KR" else "NASD"
 
             entry = {
                 "ticker": ticker,
@@ -212,6 +275,7 @@ class WatchlistManager:
                 "market_cap": market_cap,
                 "latest_price": latest_price,
                 "exchange": exchange,
+                "market": market,
                 "status": "ACTIVE",
             }
             entries.append(entry)
@@ -222,7 +286,7 @@ class WatchlistManager:
             reverse=True,
         )
 
-        saved_count = await self._save_watchlist(entries)
+        saved_count = await self._save_watchlist(entries, market=market)
 
         logger.info(
             "screening_complete",
@@ -230,18 +294,23 @@ class WatchlistManager:
             canslim_passed=len(canslim_passed),
             minervini_passed=len(minervini_passed_tickers),
             final_watchlist=saved_count,
+            market=market,
         )
 
         return entries
 
     # ── Watchlist Persistence ────────────────────────────────
 
-    async def _save_watchlist(self, entries: list[dict]) -> int:
+    async def _save_watchlist(self, entries: list[dict], *, market: str = "US") -> int:
         """Save/update watchlist entries in DB.
 
         For each entry, performs INSERT OR REPLACE. Then marks any
         previously ACTIVE tickers that are NOT in the new results
         as status='REMOVED'.
+
+        Args:
+            entries: List of watchlist entry dicts.
+            market: Market identifier ("US" or "KR"). Default: "US".
 
         Returns:
             Number of entries saved.
@@ -270,8 +339,8 @@ class WatchlistManager:
                     institutional_holders, institutional_change_pct,
                     custom_composite_score, minervini_pass,
                     sector, industry, avg_daily_volume, market_cap,
-                    status, latest_price, exchange
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    status, latest_price, exchange, market
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     ticker,
@@ -291,41 +360,45 @@ class WatchlistManager:
                     "ACTIVE",
                     entry.get("latest_price"),
                     entry.get("exchange", "NASD"),
+                    entry.get("market", "US"),
                 ),
             )
 
-        # Mark tickers NOT in the new results as REMOVED
+        # Mark tickers NOT in the new results as REMOVED (filtered by market)
         if new_tickers:
             placeholders = ",".join("?" for _ in new_tickers)
             await conn.execute(
                 f"""
                 UPDATE watchlist
                 SET status = 'REMOVED'
-                WHERE status = 'ACTIVE' AND ticker NOT IN ({placeholders})
+                WHERE status = 'ACTIVE' AND market = ? AND ticker NOT IN ({placeholders})
                 """,
-                tuple(new_tickers),
+                (market, *tuple(new_tickers)),
             )
         else:
-            # No new entries — mark all previously active as REMOVED
+            # No new entries — mark all previously active as REMOVED for this market
             await conn.execute(
-                "UPDATE watchlist SET status = 'REMOVED' WHERE status = 'ACTIVE'"
+                "UPDATE watchlist SET status = 'REMOVED' WHERE status = 'ACTIVE' AND market = ?",
+                (market,),
             )
 
         await conn.commit()
 
-        logger.info("watchlist_saved", count=len(entries))
+        logger.info("watchlist_saved", count=len(entries), market=market)
         return len(entries)
 
     # ── Watchlist Queries ────────────────────────────────────
 
-    async def get_active_watchlist(self) -> list[dict]:
+    async def get_active_watchlist(self, *, market: str | None = None) -> list[dict]:
         """Query all ACTIVE watchlist entries, ordered by composite score.
+
+        Args:
+            market: Optional market filter ("US" or "KR"). If None, returns all markets.
 
         Returns:
             List of dicts, best composite score first.
         """
-        cursor = await self._db.conn.execute(
-            """
+        query = """
             SELECT ticker, added_date, last_screened,
                    quarterly_eps_growth, annual_eps_cagr, rs_rating,
                    institutional_holders, institutional_change_pct,
@@ -334,9 +407,12 @@ class WatchlistManager:
                    status
             FROM watchlist
             WHERE status = 'ACTIVE'
-            ORDER BY custom_composite_score DESC
-            """
-        )
+        """
+        if market:
+            query += " AND market = ?"
+            cursor = await self._db.conn.execute(query + " ORDER BY custom_composite_score DESC", (market,))
+        else:
+            cursor = await self._db.conn.execute(query + " ORDER BY custom_composite_score DESC")
         rows = await cursor.fetchall()
         columns = [
             "ticker", "added_date", "last_screened",
@@ -348,15 +424,24 @@ class WatchlistManager:
         ]
         return [dict(zip(columns, row)) for row in rows]
 
-    async def get_watchlist_tickers(self) -> list[str]:
-        """Return just the ticker symbols from the active watchlist."""
-        cursor = await self._db.conn.execute(
-            """
+    async def get_watchlist_tickers(self, *, market: str | None = None) -> list[str]:
+        """Return just the ticker symbols from the active watchlist.
+
+        Args:
+            market: Optional market filter ("US" or "KR"). If None, returns all markets.
+
+        Returns:
+            List of ticker symbols.
+        """
+        query = """
             SELECT ticker FROM watchlist
             WHERE status = 'ACTIVE'
-            ORDER BY custom_composite_score DESC
-            """
-        )
+        """
+        if market:
+            query += " AND market = ?"
+            cursor = await self._db.conn.execute(query + " ORDER BY custom_composite_score DESC", (market,))
+        else:
+            cursor = await self._db.conn.execute(query + " ORDER BY custom_composite_score DESC")
         rows = await cursor.fetchall()
         return [row[0] for row in rows]
 

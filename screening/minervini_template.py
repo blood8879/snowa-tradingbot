@@ -87,7 +87,7 @@ class MinerviniTemplate:
     # ── Public API ───────────────────────────────────────────
 
     async def check(
-        self, ticker: str, rs_rating: int | None = None
+        self, ticker: str, rs_rating: int | None = None, *, market: str = "US"
     ) -> TemplateResult:
         """Run all 8 Minervini conditions for a single ticker.
 
@@ -95,6 +95,7 @@ class MinerviniTemplate:
             ticker: Stock ticker symbol.
             rs_rating: Pre-computed RS Rating (1-99). If provided,
                        an additional RS >= 70 check is appended.
+            market: Market identifier ("US" or "KR"). Default: "US".
 
         Returns:
             TemplateResult with 8 mandatory conditions (+ optional RS).
@@ -219,6 +220,7 @@ class MinerviniTemplate:
             passed=result.passed_count,
             total=len(conditions),
             all_passed=result.passed_all,
+            market=market,
         )
 
         return result
@@ -229,12 +231,15 @@ class MinerviniTemplate:
         self,
         tickers: list[str],
         rs_ratings: dict[str, int] | None = None,
+        *,
+        market: str = "US",
     ) -> list[TemplateResult]:
         """Check Minervini template for every ticker in the universe.
 
         Args:
             tickers: List of ticker symbols to check.
             rs_ratings: Optional dict mapping ticker → RS Rating (1-99).
+            market: Market identifier ("US" or "KR"). Default: "US".
 
         Returns:
             List of TemplateResult for every ticker.
@@ -243,7 +248,7 @@ class MinerviniTemplate:
 
         for i, ticker in enumerate(tickers):
             rs = rs_ratings.get(ticker) if rs_ratings else None
-            result = await self.check(ticker, rs_rating=rs)
+            result = await self.check(ticker, rs_rating=rs, market=market)
             results.append(result)
 
             if (i + 1) % 500 == 0:
@@ -253,6 +258,7 @@ class MinerviniTemplate:
                     processed=i + 1,
                     total=len(tickers),
                     passed=passed,
+                    market=market,
                 )
 
         passed_total = sum(1 for r in results if r.passed_all)
@@ -261,6 +267,7 @@ class MinerviniTemplate:
             total_tickers=len(tickers),
             passed=passed_total,
             failed=len(tickers) - passed_total,
+            market=market,
         )
 
         return results

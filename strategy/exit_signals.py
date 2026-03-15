@@ -155,6 +155,8 @@ def should_check_donchian_exit(
     current_minute: int,
     market_close_hour: int = 16,
     market_close_minute: int = 0,
+    *,
+    market: str = "US",
 ) -> bool:
     """Determine whether we are within the Donchian exit check window.
 
@@ -166,8 +168,9 @@ def should_check_donchian_exit(
     Args:
         current_hour: Current hour (24-hour format).
         current_minute: Current minute.
-        market_close_hour: Market close hour (default 16 for 4:00 PM).
+        market_close_hour: Market close hour (default 16 for 4:00 PM US).
         market_close_minute: Market close minute (default 0).
+        market: Market identifier ("US" or "KR") for documentation purposes.
 
     Returns:
         True if current time is within the exit check window

@@ -30,6 +30,7 @@ import structlog
 
 from broker.kis_auth import KISAuth
 from config.settings import TradingMode, get_settings
+from config.market_config import KR_TICK_SIZE_TABLE, adjust_price_to_tick
 from core.models import ExchangeCode, OHLCV
 
 logger = structlog.get_logger(__name__)
@@ -41,15 +42,25 @@ logger = structlog.get_logger(__name__)
 # 해외주식 현재가 상세
 TR_PRICE_DETAIL = {"live": "HHDFS76200200", "paper": "HHDFS76200200"}
 
+# 해외주식 현재가 (기본) — paper 모드에서 price-detail이 빈 응답 → 이 엔드포인트 사용
+TR_PRICE = {"live": "HHDFS76200200", "paper": "HHDFS76200200"}
+
 # 해외주식 기간별 시세 (일봉)
 TR_DAILY_PRICE = {"live": "HHDFS76240000", "paper": "HHDFS76240000"}
 
-# 해외주식 주문
-TR_ORDER_BUY = {"live": "JTTT1002U", "paper": "VTTT1002U"}
-TR_ORDER_SELL = {"live": "JTTT1006U", "paper": "VTTT1006U"}
+# 해외주식 주문 (미국: TTTT 계열 — 야간/통합)
+# KIS 공식: 미국 매수 TTTT1002U [모의투자] VTTT1002U
+#           미국 매도 TTTT1006U [모의투자] VTTT1001U (비대칭 매핑 주의!)
+TR_ORDER_BUY = {"live": "TTTT1002U", "paper": "VTTT1002U"}
+TR_ORDER_SELL = {"live": "TTTT1006U", "paper": "VTTT1001U"}
 
-# 해외주식 정정/취소
-TR_ORDER_MODIFY = {"live": "JTTT1004U", "paper": "VTTT1004U"}
+# 해외주식 주간주문 (미국: TTTS6036U/6037U — daytime order)
+# 해외주식 주간주문 (daytime order) — 90000000 에러 시 fallback용
+TR_DAYTIME_ORDER_BUY = {"live": "TTTS6036U", "paper": "VTTS6036U"}
+TR_DAYTIME_ORDER_SELL = {"live": "TTTS6037U", "paper": "VTTS6037U"}
+
+# 해외주식 정정/취소 (미국: TTTT 계열)
+TR_ORDER_MODIFY = {"live": "TTTT1004U", "paper": "VTTT1004U"}
 
 # 해외주식 미체결 내역 (주간/야간)
 TR_UNFILLED_DAY = {"live": "TTTS3018R", "paper": "VTTS3018R"}
@@ -80,6 +91,17 @@ EXCHANGE_MAP: dict[str, str] = {
     "AMEX": "AMEX",
 }
 
+# 거래소 코드 → REST /quotations/price 엔드포인트용 단축 코드
+# price-detail은 NASD/NYSE/AMEX, price(기본)는 NAS/NYS/AMS 사용
+EXCHANGE_SHORT_MAP: dict[str, str] = {
+    "NASD": "NAS",
+    "NYSE": "NYS",
+    "AMEX": "AMS",
+    "NAS": "NAS",
+    "NYS": "NYS",
+    "AMS": "AMS",
+}
+
 # 기본 리트라이 설정
 MAX_RETRIES = 3
 RETRY_DELAY_SECONDS = 1.0
@@ -105,7 +127,9 @@ class KISRestClient:
     async def _ensure_session(self) -> aiohttp.ClientSession:
         """aiohttp 세션을 가져오거나 생성."""
         if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession()
+            self._session = aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=30, connect=10)
+            )
         return self._session
 
     async def close(self) -> None:
@@ -263,6 +287,7 @@ class KISRestClient:
                         msg_cd=msg_cd,
                         msg=msg,
                         attempt=attempt,
+                        full_response=data if "order" in path else None,
                     )
                     if attempt < MAX_RETRIES:
                         await asyncio.sleep(RETRY_DELAY_SECONDS * attempt)
@@ -287,29 +312,279 @@ class KISRestClient:
         raise RuntimeError("리트라이 횟수 초과")
 
     # ────────────────────────────────────────────────────────
+    # 한국 국내주식 API (private methods)
+    # ────────────────────────────────────────────────────────
+
+    async def _kr_get_current_price(self, ticker: str, exchange: str) -> dict[str, Any]:
+        """한국 국내주식 현재가 조회."""
+        params = {
+            "FID_COND_MRKT_DIV_CODE": "J",
+            "FID_INPUT_ISCD": ticker,
+        }
+        data = await self._request(
+            "GET",
+            "/uapi/domestic-stock/v1/quotations/inquire-price",
+            "FHKST01010100",  # 실전/모의 동일
+            params=params,
+        )
+        return data.get("output", {})
+
+    async def _kr_get_daily_prices(
+        self,
+        ticker: str,
+        exchange: str,
+        period: str = "D",
+        count: int = 100,
+        end_date: str = "",
+    ) -> list[OHLCV]:
+        """한국 국내주식 일/주/월봉 조회."""
+        params = {
+            "FID_COND_MRKT_DIV_CODE": "J",
+            "FID_INPUT_ISCD": ticker,
+            "FID_PERIOD_DIV_CODE": period,
+            "FID_ORG_ADJ_PRC": "0",
+        }
+        data = await self._request(
+            "GET",
+            "/uapi/domestic-stock/v1/quotations/inquire-daily-price",
+            "FHKST01010400",  # 실전/모의 동일
+            params=params,
+        )
+
+        output = data.get("output", [])
+        result: list[OHLCV] = []
+        for item in output:
+            date_str = item.get("stck_bsop_date", "")
+            if not date_str:
+                continue
+            result.append(
+                OHLCV(
+                    date=self._format_date(date_str),
+                    open=float(item.get("stck_oprc", 0)),
+                    high=float(item.get("stck_hgpr", 0)),
+                    low=float(item.get("stck_lwpr", 0)),
+                    close=float(item.get("stck_clpr", 0)),
+                    volume=int(float(item.get("acml_vol", 0))),
+                )
+            )
+        return result
+
+    async def _kr_place_order(
+        self,
+        ticker: str,
+        exchange: str,
+        side: str,
+        quantity: int,
+        price: float,
+    ) -> dict[str, Any]:
+        """한국 국내주식 주문 (현금매수/매도)."""
+        # TR_ID 선택
+        if side == "BUY":
+            tr_map = {"live": "TTTC0802U", "paper": "VTTC0802U"}
+        else:  # SELL
+            tr_map = {"live": "TTTC0801U", "paper": "VTTC0801U"}
+
+        tr_id = self._get_tr_id(tr_map)
+
+        # 가격을 틱 단위로 조정
+        adjusted_price = int(adjust_price_to_tick(price, KR_TICK_SIZE_TABLE))
+
+        body = {
+            "CANO": self._settings.account_number,
+            "ACNT_PRDT_CD": self._settings.account_product_code,
+            "PDNO": ticker,
+            "ORD_DVSN": "00",  # 00=지정가
+            "ORD_QTY": str(quantity),
+            "ORD_UNPR": str(adjusted_price),
+        }
+
+        hashkey = await self._auth.get_hashkey(body)
+
+        data = await self._request(
+            "POST",
+            "/uapi/domestic-stock/v1/trading/order-cash",
+            tr_id,
+            body=body,
+            extra_headers={"hashkey": hashkey},
+        )
+
+        output = data.get("output", {})
+        order_no = output.get("ODNO", "")
+
+        logger.info(
+            "kis_kr_order_placed",
+            ticker=ticker,
+            side=side,
+            quantity=quantity,
+            price=adjusted_price,
+            order_no=order_no,
+        )
+
+        return output
+
+    async def _kr_get_balance(self) -> dict[str, Any]:
+        """한국 국내주식 잔고 조회."""
+        tr_map = {"live": "TTTC8434R", "paper": "VTTC8434R"}
+        tr_id = self._get_tr_id(tr_map)
+
+        params = {
+            "CANO": self._settings.account_number,
+            "ACNT_PRDT_CD": self._settings.account_product_code,
+            "AFHR_FLPR_YN": "N",
+            "OFL_YN": "",
+            "INQR_DVSN": "02",
+            "UNPR_DVSN": "01",
+            "FUND_STTL_ICLD_YN": "N",
+            "FNCG_AMT_AUTO_RDPT_YN": "N",
+            "PRCS_DVSN": "01",
+            "CTX_AREA_FK100": "",
+            "CTX_AREA_NK100": "",
+        }
+
+        data = await self._request(
+            "GET",
+            "/uapi/domestic-stock/v1/trading/inquire-balance",
+            tr_id,
+            params=params,
+        )
+
+        positions = data.get("output1", [])
+        summary_list = data.get("output2", [])
+        summary = summary_list[0] if summary_list else {}
+
+        return {
+            "summary": summary,
+            "positions": positions if isinstance(positions, list) else [],
+        }
+
+    async def _kr_get_filled_orders(
+        self,
+        start_date: str = "",
+        end_date: str = "",
+    ) -> list[dict[str, Any]]:
+        """한국 국내주식 체결 내역 조회."""
+        if not start_date:
+            start_date = datetime.now().strftime("%Y%m%d")
+        if not end_date:
+            end_date = start_date
+
+        tr_map = {"live": "TTTC8001R", "paper": "VTTC8001R"}
+        tr_id = self._get_tr_id(tr_map)
+
+        params = {
+            "CANO": self._settings.account_number,
+            "ACNT_PRDT_CD": self._settings.account_product_code,
+            "INQR_STRT_DT": start_date,
+            "INQR_END_DT": end_date,
+            "SLL_BUY_DVSN_CD": "00",
+            "INQR_DVSN": "00",
+            "PDNO": "",
+            "CCLD_DVSN": "01",
+            "ORD_GNO_BRNO": "",
+            "ODNO": "",
+            "INQR_DVSN_3": "00",
+            "INQR_DVSN_1": "",
+            "CTX_AREA_FK100": "",
+            "CTX_AREA_NK100": "",
+        }
+
+        data = await self._request(
+            "GET",
+            "/uapi/domestic-stock/v1/trading/inquire-daily-ccld",
+            tr_id,
+            params=params,
+        )
+
+        return data.get("output1", [])
+
+    async def _kr_get_unfilled_orders(self) -> list[dict[str, Any]]:
+        """한국 국내주식 미체결 조회."""
+        # Paper 모의투자에서 VTTC8036R 미지원 (90000000 에러)
+        if self._settings.is_paper:
+            return []
+        tr_map = {"live": "TTTC8036R", "paper": "VTTC8036R"}
+        tr_id = self._get_tr_id(tr_map)
+
+        params = {
+            "CANO": self._settings.account_number,
+            "ACNT_PRDT_CD": self._settings.account_product_code,
+            "CTX_AREA_FK100": "",
+            "CTX_AREA_NK100": "",
+            "INQR_DVSN_1": "0",
+            "INQR_DVSN_2": "0",
+        }
+
+        data = await self._request(
+            "GET",
+            "/uapi/domestic-stock/v1/trading/inquire-psbl-rvsecncl",
+            tr_id,
+            params=params,
+        )
+
+        return data.get("output", [])
+
+    async def _kr_get_purchasable_amount(
+        self,
+        ticker: str,
+        exchange: str,
+        price: float,
+    ) -> dict[str, Any]:
+        """한국 국내주식 매수가능금액 조회."""
+        tr_map = {"live": "TTTC8908R", "paper": "VTTC8908R"}
+        tr_id = self._get_tr_id(tr_map)
+
+        adjusted_price = int(adjust_price_to_tick(price, KR_TICK_SIZE_TABLE))
+
+        params = {
+            "CANO": self._settings.account_number,
+            "ACNT_PRDT_CD": self._settings.account_product_code,
+            "PDNO": ticker,
+            "ORD_UNPR": str(adjusted_price),
+            "ORD_DVSN": "00",
+            "CMA_EVLU_AMT_ICLD_YN": "Y",
+            "OVRS_ICLD_YN": "N",
+        }
+
+        data = await self._request(
+            "GET",
+            "/uapi/domestic-stock/v1/trading/inquire-psbl-order",
+            tr_id,
+            params=params,
+        )
+
+        return data.get("output", {})
+
+    # ────────────────────────────────────────────────────────
     # 시세 조회
     # ────────────────────────────────────────────────────────
 
-    async def get_current_price(self, ticker: str, exchange: str) -> dict[str, Any]:
+    async def get_current_price(self, ticker: str, exchange: str, *, market: str = "US") -> dict[str, Any]:
         """
-        해외주식 현재가 상세 조회.
+        현재가 상세 조회.
 
         Args:
-            ticker: 종목 코드 (예: "AAPL")
+            ticker: 종목 코드 (예: "AAPL" 또는 "005930")
             exchange: 거래소 코드 (예: "NASD", "NYSE", "AMEX")
+            market: 시장 구분 ("US" 또는 "KR")
 
         Returns:
             현재가 정보 dict (stck_prpr: 현재가, stck_oprc: 시가, 등)
         """
+        if market == "KR":
+            return await self._kr_get_current_price(ticker, exchange)
+
+        # Bug #20 fix: paper 모드에서 price-detail은 빈 응답 반환
+        # → /quotations/price (기본) 엔드포인트 사용 + 단축 거래소 코드(NYS/NAS/AMS)
+        short_excd = EXCHANGE_SHORT_MAP.get(exchange, exchange)
         params = {
             "AUTH": "",
-            "EXCD": exchange,
+            "EXCD": short_excd,
             "SYMB": ticker,
         }
         data = await self._request(
             "GET",
-            "/uapi/overseas-price/v1/quotations/price-detail",
-            self._get_tr_id(TR_PRICE_DETAIL),
+            "/uapi/overseas-price/v1/quotations/price",
+            self._get_tr_id(TR_PRICE),
             params=params,
         )
         return data.get("output", {})
@@ -321,9 +596,11 @@ class KISRestClient:
         period: str = "D",
         count: int = 100,
         end_date: str = "",
+        *,
+        market: str = "US",
     ) -> list[OHLCV]:
         """
-        해외주식 기간별 시세 (일봉 OHLCV) 조회.
+        기간별 시세 (일봉 OHLCV) 조회.
 
         Args:
             ticker: 종목 코드
@@ -331,10 +608,14 @@ class KISRestClient:
             period: "D"=일봉, "W"=주봉, "M"=월봉
             count: 조회 건수 (최대 100)
             end_date: 조회 종료일 (YYYYMMDD, 공백이면 오늘)
+            market: 시장 구분 ("US" 또는 "KR")
 
         Returns:
             OHLCV 리스트 (최신 날짜부터)
         """
+        if market == "KR":
+            return await self._kr_get_daily_prices(ticker, exchange, period, count, end_date)
+
         params = {
             "AUTH": "",
             "EXCD": exchange,
@@ -378,6 +659,8 @@ class KISRestClient:
         ticker: str,
         exchange: str,
         days: int = 300,
+        *,
+        market: str = "US",
     ) -> list[OHLCV]:
         """
         여러 번 호출해서 지정 일수만큼의 일봉 데이터를 수집.
@@ -389,7 +672,7 @@ class KISRestClient:
 
         while len(all_data) < days:
             batch = await self.get_daily_prices(
-                ticker, exchange, period="D", count=100, end_date=end_date
+                ticker, exchange, period="D", count=100, end_date=end_date, market=market
             )
             if not batch:
                 break
@@ -430,9 +713,11 @@ class KISRestClient:
         side: str,
         quantity: int,
         price: float,
+        *,
+        market: str = "US",
     ) -> dict[str, Any]:
         """
-        해외주식 지정가 주문.
+        지정가 주문.
 
         Args:
             ticker: 종목 코드
@@ -440,14 +725,19 @@ class KISRestClient:
             side: "BUY" 또는 "SELL"
             quantity: 수량
             price: 지정가
+            market: 시장 구분 ("US" 또는 "KR")
 
         Returns:
             주문 응답 (ODNO: 주문번호 포함)
         """
+        if market == "KR":
+            return await self._kr_place_order(ticker, exchange, side, quantity, price)
+
         tr_map = TR_ORDER_BUY if side == "BUY" else TR_ORDER_SELL
         tr_id = self._get_tr_id(tr_map)
 
         # 주문 유형: 00=지정가
+        # KIS 공식: 매도 시 SLL_TYPE="00" 필수, 매수 시 SLL_TYPE="" (빈값)
         body = {
             "CANO": self._settings.account_number,
             "ACNT_PRDT_CD": self._settings.account_product_code,
@@ -455,20 +745,52 @@ class KISRestClient:
             "PDNO": ticker,
             "ORD_QTY": str(quantity),
             "OVRS_ORD_UNPR": f"{price:.2f}",
+            "CTAC_TLNO": "",
+            "MGCO_APTM_ODNO": "",
+            "SLL_TYPE": "00" if side == "SELL" else "",
             "ORD_SVR_DVSN_CD": "0",
             "ORD_DVSN": "00",  # 00=지정가
         }
 
-        # hashkey 필요
-        hashkey = await self._auth.get_hashkey(body)
-
-        data = await self._request(
-            "POST",
-            "/uapi/overseas-stock/v1/trading/order",
-            tr_id,
+        # DEBUG: 주문 요청 바디 로깅
+        logger.warning(
+            "kis_order_debug_body",
+            tr_id=tr_id,
+            side=side,
+            ticker=ticker,
             body=body,
-            extra_headers={"hashkey": hashkey},
         )
+
+        try:
+            data = await self._request(
+                "POST",
+                "/uapi/overseas-stock/v1/trading/order",
+                tr_id,
+                body=body,
+            )
+        except KISAPIError as e:
+            # 모의투자 해외주식에서 90000000 에러 시 주간주문 엔드포인트로 fallback
+            if e.msg_cd == "90000000" and self._settings.is_paper:
+                daytime_tr_map = TR_DAYTIME_ORDER_BUY if side == "BUY" else TR_DAYTIME_ORDER_SELL
+                daytime_tr_id = self._get_tr_id(daytime_tr_map)
+                logger.info(
+                    "kis_order_fallback_daytime",
+                    original_tr_id=tr_id,
+                    daytime_tr_id=daytime_tr_id,
+                    ticker=ticker,
+                    side=side,
+                )
+                try:
+                    data = await self._request(
+                        "POST",
+                        "/uapi/overseas-stock/v1/trading/daytime-order",
+                        daytime_tr_id,
+                        body=body,
+                    )
+                except KISAPIError as e2:
+                    raise
+            else:
+                raise
 
         output = data.get("output", {})
         order_no = output.get("ODNO", "")
@@ -581,8 +903,11 @@ class KISRestClient:
     # 조회
     # ────────────────────────────────────────────────────────
 
-    async def get_unfilled_orders(self) -> list[dict[str, Any]]:
-        """해외주식 미체결 주문 조회 — 전 거래소(NASD/NYSE/AMEX)."""
+    async def get_unfilled_orders(self, *, market: str = "US") -> list[dict[str, Any]]:
+        """미체결 주문 조회."""
+        if market == "KR":
+            return await self._kr_get_unfilled_orders()
+
         all_orders: list[dict[str, Any]] = []
         seen_odno: set[str] = set()
         tr_id = await self._get_overseas_tr_id(TR_UNFILLED_DAY, TR_UNFILLED_NIGHT)
@@ -617,14 +942,20 @@ class KISRestClient:
         self,
         start_date: str = "",
         end_date: str = "",
+        *,
+        market: str = "US",
     ) -> list[dict[str, Any]]:
         """
-        해외주식 체결 내역 조회 — 전 거래소(NASD/NYSE/AMEX).
+        체결 내역 조회.
 
         Args:
             start_date: 조회 시작일 (YYYYMMDD)
             end_date: 조회 종료일 (YYYYMMDD)
+            market: 시장 구분 ("US" 또는 "KR")
         """
+        if market == "KR":
+            return await self._kr_get_filled_orders(start_date, end_date)
+
         if not start_date:
             start_date = datetime.now().strftime("%Y%m%d")
         if not end_date:
@@ -670,16 +1001,22 @@ class KISRestClient:
 
         return all_fills
 
-    async def get_balance(self) -> dict[str, Any]:
+    async def get_balance(self, *, market: str = "US") -> dict[str, Any]:
         """
-        해외주식 잔고 조회 (NASD/NYSE/AMEX 전체).
+        잔고 조회.
+
+        Args:
+            market: 시장 구분 ("US" 또는 "KR")
 
         Returns:
             {
-                "summary": {...},                      # 마지막 거래소의 계좌 요약
-                "positions": [{...}, {...}, ...],      # 전 거래소 보유 종목 리스트
+                "summary": {...},                      # 계좌 요약
+                "positions": [{...}, {...}, ...],      # 보유 종목 리스트
             }
         """
+        if market == "KR":
+            return await self._kr_get_balance()
+
         tr_id = await self._get_overseas_tr_id(TR_BALANCE_DAY, TR_BALANCE_NIGHT)
         all_positions: list[dict[str, Any]] = []
         summary: dict[str, Any] = {}
@@ -747,7 +1084,21 @@ class KISRestClient:
         ticker: str = "AAPL",
         exchange: str = "NASD",
         price: str = "100",
+        *,
+        market: str = "US",
     ) -> dict[str, Any]:
+        """
+        매수가능금액 조회.
+
+        Args:
+            ticker: 종목 코드
+            exchange: 거래소 코드
+            price: 가격 (문자열)
+            market: 시장 구분 ("US" 또는 "KR")
+        """
+        if market == "KR":
+            return await self._kr_get_purchasable_amount(ticker, exchange, float(price))
+
         params = {
             "CANO": self._settings.account_number,
             "ACNT_PRDT_CD": self._settings.account_product_code,
