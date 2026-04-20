@@ -359,10 +359,14 @@ class DartFinancialFetcher:
 
         Tries the 2 most recent fiscal years (year-1, year-2) so that
         stocks screened for the first time in any month get complete data.
-        Skips years where Q4 already exists in DB or Q1+Q2+Q3 are missing.
+
+        Q4 = Annual - (Q1 + Q2 + Q3).  Requires ALL THREE quarters
+        (Q1, Q2, Q3) to be present before deriving.  Always recalculates
+        to handle the case where Q1/Q2/Q3 data was updated after initial
+        Q4 derivation.
 
         Annual reports (사업보고서) are due by March 31 of the following year,
-        so year-1 data is typically available from April onward.
+        but many large companies file in March.
 
         Returns list of Q4 fundamental record dicts (0-2 records).
         """
@@ -371,18 +375,10 @@ class DartFinancialFetcher:
         results: list[dict] = []
 
         for target_year in [now.year - 1, now.year - 2]:
-            # Check if Q4 already exists in DB
-            cursor = await db.conn.execute(
-                "SELECT eps FROM fundamentals WHERE ticker = ? AND period = ?",
-                (stock_code, f"{target_year}Q4"),
-            )
-            if await cursor.fetchone():
-                continue  # Q4 already stored
-
-            # Check Q1+Q2+Q3 in DB BEFORE calling DART API (avoid wasted calls)
+            # Require ALL 3 quarters (Q1, Q2, Q3) to be present individually
             cursor = await db.conn.execute(
                 """
-                SELECT SUM(net_income)
+                SELECT period, net_income
                 FROM fundamentals
                 WHERE ticker = ? AND period_type = 'quarterly'
                   AND period IN (?, ?, ?)
@@ -395,18 +391,20 @@ class DartFinancialFetcher:
                     f"{target_year}Q3",
                 ),
             )
-            row = await cursor.fetchone()
-            q123_sum = row[0] if row and row[0] is not None else None
+            rows = await cursor.fetchall()
 
-            if q123_sum is None:
+            if len(rows) < 3:
                 logger.debug(
                     "dart_q4_missing_quarters",
                     stock_code=stock_code,
                     year=target_year,
+                    found=len(rows),
                 )
                 continue
 
-            # Fetch annual report from DART (only if Q1+Q2+Q3 exist)
+            q123_sum = sum(r[1] for r in rows)
+
+            # Fetch annual report from DART
             annual_net_income = await loop.run_in_executor(
                 None, self._fetch_annual_net_income, corp_code, target_year
             )
@@ -485,8 +483,9 @@ class DartFinancialFetcher:
 
         # Try recent annual reports: each gives current year + prior year
         # Start from most recent likely available, then go back for CAGR depth
-        # Annual reports are due by March 31 → available from April
-        latest_annual = now.year - 1 if now.month >= 4 else now.year - 2
+        # Annual reports are due by March 31, but many large companies file
+        # in March.  Always try year-1 first (DART returns error if not filed).
+        latest_annual = now.year - 1
         for year in [latest_annual, latest_annual - 2]:
             self._rate_limit()
 

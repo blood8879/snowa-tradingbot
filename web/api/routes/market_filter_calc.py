@@ -21,16 +21,20 @@ _CACHE_TTL = 300
 
 def _determine_regime(sma_pass, breadth_pct, roc):
     """Determine regime from signals (same logic as strategy/market_filter.py)."""
-    if not sma_pass:
-        return "RED", 0.0
     breadth_ok = breadth_pct is None or breadth_pct >= MARKET_BREADTH_GREEN
     breadth_bad = breadth_pct is not None and breadth_pct < MARKET_BREADTH_RED
     roc_ok = roc is None or roc >= MARKET_ROC_WARNING
     roc_bad = roc is not None and roc < MARKET_ROC_WARNING
+    # Both breadth AND ROC bad → RED (regardless of SMA)
     if breadth_bad and roc_bad:
         return "RED", 0.0
+    # SMA failure alone → YELLOW (not RED)
+    if not sma_pass:
+        return "YELLOW", MARKET_REGIME_YELLOW_SCALE
+    # SMA pass + both good → GREEN
     if breadth_ok and roc_ok:
         return "GREEN", 1.0
+    # One weak → YELLOW
     return "YELLOW", MARKET_REGIME_YELLOW_SCALE
 
 

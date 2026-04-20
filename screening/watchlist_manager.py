@@ -13,7 +13,9 @@ Workflow:
 
 from __future__ import annotations
 
+import csv
 from datetime import datetime
+from pathlib import Path
 
 import structlog
 
@@ -96,6 +98,19 @@ class WatchlistManager:
         template = MinerviniTemplate(market_data)
         composite_calc = CompositeScoreCalculator(fundamental_data, market_data)
 
+        # ── Step 2.5: Load existing watchlist for hysteresis ─────
+        # Why: 기존 watchlist 종목은 HOLD 임계치(관대)로 평가해서 경계값 토글 방지.
+        #      또한 데이터 결손 시 이전 값으로 fallback.
+        existing_tickers, previous_values_map = await self._load_existing_watchlist(
+            market=market,
+        )
+        logger.info(
+            "existing_watchlist_loaded",
+            count=len(existing_tickers),
+            with_previous_values=len(previous_values_map),
+            market=market,
+        )
+
         # ── Step 3: Calculate RS Ratings ─────────────────────
         rs_ratings = await rs_calc.calculate_universe(tickers, market=market)
 
@@ -112,12 +127,23 @@ class WatchlistManager:
                 from data.dart_financial import DartFinancialFetcher
                 from config.constants import CANSLIM_MIN_RS_RATING
 
-                # Pre-filter: only fetch DART data for stocks likely to pass S+L
-                # RS >= 80 (L filter threshold) to minimize API calls
+                # Pre-filter: RS >= 80 candidates + existing watchlist tickers
+                # (watchlist tickers need fresh data for re-screening)
                 dart_candidates = [
                     t for t in tickers
                     if rs_ratings.get(t, 0) >= CANSLIM_MIN_RS_RATING
                 ]
+                # Always include existing watchlist tickers regardless of RS
+                cursor = await self._db.conn.execute(
+                    "SELECT ticker FROM watchlist WHERE status = 'ACTIVE' AND market = ?",
+                    (market,),
+                )
+                existing_rows = await cursor.fetchall()
+                existing_tickers = {row[0] for row in existing_rows}
+                dart_candidate_set = set(dart_candidates)
+                for t in existing_tickers:
+                    if t not in dart_candidate_set and t in set(tickers):
+                        dart_candidates.append(t)
 
                 logger.info(
                     "dart_prefetch_start",
@@ -149,8 +175,11 @@ class WatchlistManager:
                 )
 
         # ── Step 4: Run CANSLIM screening (core filters: C/A/S/L) ──
+        # 기존 watchlist 종목은 hold_mode=True로 HOLD 임계치 적용 (hysteresis)
         canslim_results = await screener.screen_universe(
             tickers, rs_ratings, core_only=True, market=market,
+            existing_tickers=existing_tickers,
+            previous_values_map=previous_values_map,
         )
 
         # ── Step 5: Filter to passed tickers ─────────────────
@@ -165,12 +194,15 @@ class WatchlistManager:
         )
 
         # ── Step 6: Run Minervini template ───────────────────
+        # 기존 watchlist 종목은 passed_for_hold (8개 중 6개 + 200MA 필수)로 평가
         minervini_passed_tickers: list[str] = []
         for ticker in canslim_passed_tickers:
             try:
                 rs = rs_ratings.get(ticker)
                 result = await template.check(ticker, rs_rating=rs, market=market)
-                if result.passed_all:
+                is_existing = ticker in existing_tickers
+                check_pass = result.passed_for_hold if is_existing else result.passed_all
+                if check_pass:
                     minervini_passed_tickers.append(ticker)
             except Exception:
                 logger.warning(
@@ -286,7 +318,16 @@ class WatchlistManager:
             reverse=True,
         )
 
-        saved_count = await self._save_watchlist(entries, market=market)
+        # Build removal reason lookup from screening results
+        canslim_all: dict[str, "CANSLIMResult"] = {r.ticker: r for r in canslim_results}
+        minervini_set = set(minervini_passed_tickers)
+
+        saved_count = await self._save_watchlist(
+            entries,
+            market=market,
+            canslim_all=canslim_all,
+            minervini_set=minervini_set,
+        )
 
         logger.info(
             "screening_complete",
@@ -299,9 +340,77 @@ class WatchlistManager:
 
         return entries
 
+    # ── Hysteresis Support ───────────────────────────────────
+
+    async def _load_existing_watchlist(
+        self, *, market: str,
+    ) -> tuple[set[str], dict[str, dict]]:
+        """Load current ACTIVE watchlist tickers and their last screening values.
+
+        Used to apply hysteresis (HOLD thresholds) and data-gap fallback
+        during the next screening run.
+
+        Args:
+            market: Market filter ('US' or 'KR').
+
+        Returns:
+            (existing_tickers, previous_values_map)
+            previous_values_map: ticker → {quarterly_eps_growth, annual_eps_cagr,
+                                           rs_rating, last_screened}
+            Only includes tickers whose last_screened is within
+            SCREENING_FALLBACK_MAX_DAYS.
+        """
+        from config.constants import SCREENING_FALLBACK_MAX_DAYS
+        from datetime import datetime, timedelta
+
+        cursor = await self._db.conn.execute(
+            """SELECT ticker, quarterly_eps_growth, annual_eps_cagr,
+                      rs_rating, last_screened
+               FROM watchlist
+               WHERE status = 'ACTIVE' AND market = ?""",
+            (market,),
+        )
+        rows = await cursor.fetchall()
+
+        cutoff = datetime.now() - timedelta(days=SCREENING_FALLBACK_MAX_DAYS)
+        existing: set[str] = set()
+        prev_map: dict[str, dict] = {}
+
+        for row in rows:
+            ticker, qeg, acagr, rs, last_screened = row
+            existing.add(ticker)
+
+            # Only include values if last_screened is recent enough
+            if last_screened:
+                try:
+                    ts = datetime.fromisoformat(last_screened)
+                    if ts < cutoff:
+                        continue
+                except (ValueError, TypeError):
+                    continue
+
+            values: dict = {}
+            if qeg is not None:
+                values["quarterly_eps_growth"] = qeg
+            if acagr is not None:
+                values["annual_eps_cagr"] = acagr
+            if rs is not None:
+                values["rs_rating"] = rs
+            if values:
+                prev_map[ticker] = values
+
+        return existing, prev_map
+
     # ── Watchlist Persistence ────────────────────────────────
 
-    async def _save_watchlist(self, entries: list[dict], *, market: str = "US") -> int:
+    async def _save_watchlist(
+        self,
+        entries: list[dict],
+        *,
+        market: str = "US",
+        canslim_all: dict | None = None,
+        minervini_set: set | None = None,
+    ) -> int:
         """Save/update watchlist entries in DB.
 
         For each entry, performs INSERT OR REPLACE. Then marks any
@@ -311,6 +420,8 @@ class WatchlistManager:
         Args:
             entries: List of watchlist entry dicts.
             market: Market identifier ("US" or "KR"). Default: "US".
+            canslim_all: All CANSLIM results keyed by ticker (for removal reasons).
+            minervini_set: Set of tickers that passed Minervini template.
 
         Returns:
             Number of entries saved.
@@ -318,6 +429,13 @@ class WatchlistManager:
         conn = self._db.conn
         now = datetime.now().isoformat(timespec="seconds")
         new_tickers: set[str] = set()
+
+        # Get currently active tickers before update
+        active_cursor = await conn.execute(
+            "SELECT ticker FROM watchlist WHERE status = 'ACTIVE' AND market = ?",
+            (market,),
+        )
+        prev_active = {row[0] for row in await active_cursor.fetchall()}
 
         for entry in entries:
             ticker = entry["ticker"]
@@ -384,8 +502,154 @@ class WatchlistManager:
 
         await conn.commit()
 
+        # Log watchlist changes to history
+        added_tickers = new_tickers - prev_active
+        removed_tickers = prev_active - new_tickers
+
+        # Load KR stock names for history records
+        kr_names: dict[str, str] = {}
+        if market == "KR" and (added_tickers or removed_tickers):
+            cache_path = Path("data/universe_kr_cache.csv")
+            if cache_path.exists():
+                try:
+                    with open(cache_path, "r", encoding="utf-8") as f:
+                        reader = csv.DictReader(f)
+                        for row in reader:
+                            kr_names[row["ticker"]] = row["name"]
+                except Exception:
+                    pass
+
+        for ticker in added_tickers:
+            entry_data = next((e for e in entries if e["ticker"] == ticker), None)
+            eps_g = entry_data.get("quarterly_eps_growth") if entry_data else None
+            cagr = entry_data.get("annual_eps_cagr") if entry_data else None
+            rs = entry_data.get("rs_rating") if entry_data else None
+            cs = entry_data.get("custom_composite_score") if entry_data else None
+            stock_name = (entry_data.get("name") if entry_data else None) or kr_names.get(ticker)
+            reason_parts = ["CANSLIM+Minervini 통과"]
+            if eps_g is not None:
+                reason_parts.append(f"EPS성장 {eps_g * 100:.0f}%")
+            if rs is not None:
+                reason_parts.append(f"RS {rs:.0f}")
+            if cs is not None:
+                reason_parts.append(f"종합 {cs:.0f}")
+            await conn.execute(
+                """INSERT INTO watchlist_history
+                   (ticker, name, market, action, reason, quarterly_eps_growth, annual_eps_cagr,
+                    rs_rating, composite_score, minervini_pass, recorded_at)
+                   VALUES (?, ?, ?, 'ADDED', ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    ticker,
+                    stock_name,
+                    market,
+                    ", ".join(reason_parts),
+                    eps_g, cagr, rs, cs,
+                    entry_data.get("minervini_pass", 0) if entry_data else 0,
+                    now,
+                ),
+            )
+
+        for ticker in removed_tickers:
+            score_cursor = await conn.execute(
+                """SELECT quarterly_eps_growth, annual_eps_cagr, rs_rating,
+                          custom_composite_score, minervini_pass, name
+                   FROM watchlist WHERE ticker = ?""",
+                (ticker,),
+            )
+            score_row = await score_cursor.fetchone()
+
+            # Use latest screening values where available, fallback to DB
+            prev_eps_g = score_row[0] if score_row else None
+            prev_cagr = score_row[1] if score_row else None
+            canslim_r = canslim_all.get(ticker) if canslim_all else None
+            new_eps_g = canslim_r.c_filter.value if canslim_r and canslim_r.c_filter.value is not None else prev_eps_g
+            new_cagr = canslim_r.a_filter.value if canslim_r and canslim_r.a_filter.value is not None else prev_cagr
+
+            # Build specific removal reason (with prev values for comparison)
+            reason = self._build_removal_reason(ticker, canslim_all, minervini_set, prev_eps_g=prev_eps_g, prev_cagr=prev_cagr)
+
+            removed_name = (score_row[5] if score_row else None) or kr_names.get(ticker)
+            await conn.execute(
+                """INSERT INTO watchlist_history
+                   (ticker, name, market, action, reason, quarterly_eps_growth, annual_eps_cagr,
+                    rs_rating, composite_score, minervini_pass, recorded_at)
+                   VALUES (?, ?, ?, 'REMOVED', ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    ticker,
+                    removed_name,
+                    market,
+                    reason,
+                    new_eps_g,
+                    new_cagr,
+                    score_row[2] if score_row else None,
+                    score_row[3] if score_row else None,
+                    score_row[4] if score_row else 0,
+                    now,
+                ),
+            )
+
+        if added_tickers or removed_tickers:
+            await conn.commit()
+            logger.info(
+                "watchlist_history_logged",
+                added=len(added_tickers),
+                removed=len(removed_tickers),
+                market=market,
+            )
+
         logger.info("watchlist_saved", count=len(entries), market=market)
         return len(entries)
+
+    @staticmethod
+    def _build_removal_reason(
+        ticker: str,
+        canslim_all: dict | None,
+        minervini_set: set | None,
+        *,
+        prev_eps_g: float | None = None,
+        prev_cagr: float | None = None,
+    ) -> str:
+        """Build a human-readable removal reason from screening results."""
+        if canslim_all is None:
+            return "스크리닝 탈락"
+
+        result = canslim_all.get(ticker)
+        if result is None:
+            return "유니버스 제외 (상장폐지/거래량 부족)"
+
+        # Check which CANSLIM filters failed
+        failed: list[str] = []
+        if not result.c_filter.passed:
+            val = result.c_filter.value
+            if val is not None:
+                prev_str = f"{prev_eps_g * 100:.0f}%→" if prev_eps_g is not None else ""
+                failed.append(f"분기EPS성장 미달({prev_str}{val * 100:.0f}%<25%)")
+            else:
+                failed.append("분기EPS 데이터 없음")
+        if not result.a_filter.passed:
+            val = result.a_filter.value
+            if val is not None:
+                prev_str = f"{prev_cagr * 100:.0f}%→" if prev_cagr is not None else ""
+                failed.append(f"연간EPS성장 미달({prev_str}{val * 100:.0f}%<25%)")
+            else:
+                failed.append("연간EPS 데이터 없음")
+        if not result.s_filter.passed:
+            failed.append("거래량 부족")
+        if not result.l_filter.passed:
+            val = result.l_filter.value
+            if val is not None:
+                failed.append(f"RS등급 미달({val:.0f}<80)")
+            else:
+                failed.append("RS등급 데이터 없음")
+
+        if failed:
+            return "CANSLIM 탈락: " + ", ".join(failed)
+
+        # Passed CANSLIM but failed Minervini
+        if minervini_set is not None and ticker not in minervini_set:
+            return "Minervini 추세 템플릿 미통과"
+
+        return "스크리닝 탈락"
 
     # ── Watchlist Queries ────────────────────────────────────
 

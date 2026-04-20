@@ -493,6 +493,7 @@ class IntradayMonitor:
             account_equity=account_equity,
             entry_price=price,
             n_value=signals.n_value,
+            market=self._market,
         )
         if sizing["skip"]:
             logger.info(
@@ -665,6 +666,7 @@ class IntradayMonitor:
             account_equity=effective_equity,
             entry_price=price,
             n_value=signals.n_value,
+            market=self._market,
         )
         if sizing["skip"]:
             logger.info(

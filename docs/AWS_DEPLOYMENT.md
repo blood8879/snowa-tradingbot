@@ -388,7 +388,7 @@ python -m scripts.run_bot
 **봇 서비스:**
 
 ```bash
-sudo nano /etc/systemd/system/snowa-bot.service
+sudo vi /etc/systemd/system/snowa-bot.service
 ```
 
 ```ini
@@ -420,7 +420,7 @@ WantedBy=multi-user.target
 **대시보드 서비스:**
 
 ```bash
-sudo nano /etc/systemd/system/snowa-dashboard.service
+sudo vi /etc/systemd/system/snowa-dashboard.service
 ```
 
 ```ini

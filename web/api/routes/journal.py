@@ -45,36 +45,71 @@ async def get_journal(
         default="",
         description="Month in YYYY-MM format (defaults to current month)",
     ),
+    start_month: str = Query(
+        default="",
+        description="Range start month YYYY-MM (inclusive). Overrides `month`.",
+    ),
+    end_month: str = Query(
+        default="",
+        description="Range end month YYYY-MM (inclusive). Overrides `month`.",
+    ),
+    all_time: bool = Query(
+        default=False,
+        description="If true, aggregate over all available history.",
+    ),
     market: str = Query(default="US", description="Market filter (US, KR, ALL)"),
     db: Database = Depends(get_db),
     account_mgr: AccountManager | None = Depends(get_account_manager),
 ) -> dict:
-    """Return trade statistics for a specified month.
+    """Return trade statistics for a specified month or month range.
 
     Calculates win rate, risk-reward ratio, max drawdown,
-    and other statistics from closed positions in the given month.
+    and other statistics from closed positions in the given window.
 
     Args:
-        month: Target month in YYYY-MM format.
+        month: Single target month (YYYY-MM). Used when range is absent.
+        start_month: Range start (YYYY-MM, inclusive).
+        end_month: Range end (YYYY-MM, inclusive).
+        all_time: Aggregate over all history ignoring month args.
+        market: Market filter.
         db: Database dependency.
 
     Returns:
-        Dict with monthly trade stats (win rate, R:R, MDD, etc.).
+        Dict with aggregated trade stats (win rate, R:R, MDD, etc.).
     """
-    # Default to current month
-    if not month:
-        month = datetime.now().strftime("%Y-%m")
+    current_month_str = datetime.now().strftime("%Y-%m")
 
-    # Validate format
-    try:
-        datetime.strptime(month, "%Y-%m")
-    except ValueError:
-        return {"error": "Invalid month format. Use YYYY-MM."}
+    if all_time:
+        cursor_range = await db.conn.execute(
+            "SELECT MIN(substr(closed_at, 1, 7)) FROM positions WHERE status='CLOSED'"
+        )
+        row_range = await cursor_range.fetchone()
+        resolved_start = (row_range[0] if row_range and row_range[0] else current_month_str)
+        resolved_end = current_month_str
+    elif start_month or end_month:
+        resolved_start = start_month or end_month or current_month_str
+        resolved_end = end_month or start_month or current_month_str
+    else:
+        resolved_start = month or current_month_str
+        resolved_end = resolved_start
 
-    month_start = f"{month}-01"
-    year, mon = month.split("-")
-    last_day = calendar.monthrange(int(year), int(mon))[1]
-    month_end = f"{month}-{last_day:02d}"
+    # Validate formats
+    for m in (resolved_start, resolved_end):
+        try:
+            datetime.strptime(m, "%Y-%m")
+        except ValueError:
+            return {"error": "Invalid month format. Use YYYY-MM."}
+
+    # Normalize so start <= end
+    if resolved_start > resolved_end:
+        resolved_start, resolved_end = resolved_end, resolved_start
+
+    month_start = f"{resolved_start}-01"
+    end_year, end_mon = resolved_end.split("-")
+    last_day = calendar.monthrange(int(end_year), int(end_mon))[1]
+    month_end = f"{resolved_end}-{last_day:02d}"
+    # Legacy field: keep single-month identifier when range is a single month
+    month = resolved_start if resolved_start == resolved_end else f"{resolved_start}~{resolved_end}"
 
     # Closed positions in this month
     journal_params: list = [month_start, month_end]
@@ -107,6 +142,24 @@ async def get_journal(
     total_loss_pnl = 0.0
     total_risk = 0.0
     total_reward = 0.0
+    holding_days_sum = 0.0
+    holding_days_count = 0
+    win_holding_sum = 0.0
+    win_holding_count = 0
+    loss_holding_sum = 0.0
+    loss_holding_count = 0
+
+    def _parse_dt(raw: str | None):
+        if not raw:
+            return None
+        s = raw.replace("Z", "+00:00")
+        try:
+            return datetime.fromisoformat(s)
+        except ValueError:
+            try:
+                return datetime.strptime(raw[:19], "%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                return None
 
     for r in rows:
         pnl = r[2] or 0.0
@@ -132,11 +185,29 @@ async def get_journal(
         total_cost = r[9] or 0.0
         exit_price = (total_cost + pnl) / total_shares if total_shares > 0 else 0.0
 
+        opened_dt = _parse_dt(r[3])
+        closed_dt = _parse_dt(r[4])
+        holding_days: float | None = None
+        if opened_dt and closed_dt:
+            delta_seconds = (closed_dt - opened_dt).total_seconds()
+            holding_days = max(round(delta_seconds / 86400, 2), 0.0)
+            holding_days_sum += holding_days
+            holding_days_count += 1
+            if pnl > 0:
+                win_holding_sum += holding_days
+                win_holding_count += 1
+            elif pnl < 0:
+                loss_holding_sum += holding_days
+                loss_holding_count += 1
+
+        pnl_pct = (pnl / total_cost * 100) if total_cost > 0 else 0.0
+
         trades.append({
             "ticker": ticker,
             "name": kr_names.get(ticker) if market == "KR" else None,
             "system": r[1],
             "realized_pnl": pnl,
+            "realized_pnl_pct": round(pnl_pct, 2),
             "opened_at": r[3],
             "closed_at": r[4],
             "close_reason": r[5],
@@ -145,7 +216,24 @@ async def get_journal(
             "exit_price": round(exit_price, 4),
             "total_shares": total_shares,
             "risk_per_share": round(risk_per_share, 4),
+            "holding_days": holding_days,
         })
+
+    avg_holding_days = (
+        round(holding_days_sum / holding_days_count, 2)
+        if holding_days_count > 0
+        else 0.0
+    )
+    avg_win_holding_days = (
+        round(win_holding_sum / win_holding_count, 2)
+        if win_holding_count > 0
+        else 0.0
+    )
+    avg_loss_holding_days = (
+        round(loss_holding_sum / loss_holding_count, 2)
+        if loss_holding_count > 0
+        else 0.0
+    )
 
     total_trades = winners + losers
     win_rate = (winners / total_trades * 100) if total_trades > 0 else 0.0
@@ -207,9 +295,13 @@ async def get_journal(
     min_equity = pnl_row[1] if pnl_row and pnl_row[1] else 0.0
     max_equity = pnl_row[2] if pnl_row and pnl_row[2] else 0.0
 
-    # ── 현재월이면 실시간 브로커 equity로 보정 ──
+    # ── 단일 현재월 조회일 때만 실시간 브로커 equity로 보정 ──
+    # 범위/전체 조회에서는 SUM(daily_pnl)이 정답이므로 덮어쓰지 않는다.
     current_month = datetime.now(timezone.utc).strftime("%Y-%m")
-    if month == current_month and account_mgr is not None:
+    is_single_current_month = (
+        resolved_start == resolved_end == current_month
+    )
+    if is_single_current_month and account_mgr is not None:
         try:
             info = await account_mgr.get_account_info(market=market)
             live_equity = info.total_equity
@@ -285,6 +377,8 @@ async def get_journal(
 
     return {
         "month": month,
+        "start_month": resolved_start,
+        "end_month": resolved_end,
         "stats": {
             "total_trades": total_trades,
             "winners": winners,
@@ -297,6 +391,9 @@ async def get_journal(
             "monthly_pnl": round(monthly_pnl, 2),
             "min_equity": round(min_equity, 2),
             "max_equity": round(max_equity, 2),
+            "avg_holding_days": avg_holding_days,
+            "avg_win_holding_days": avg_win_holding_days,
+            "avg_loss_holding_days": avg_loss_holding_days,
         },
         "trades": trades,
     }

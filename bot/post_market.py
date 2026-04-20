@@ -474,7 +474,21 @@ class PostMarketProcessor:
 
     async def _update_ibd_direction(self, market: str = "US") -> dict | None:
         try:
+            from config.constants import IBD_INDEXES_KR, IBD_INDEXES_US
             from strategy.ibd_market_direction import IBDMarketDirection
+
+            # IBD 인덱스 종목 가격을 명시적으로 갱신
+            # (유니버스/watchlist에 없는 ETF도 포함되므로 별도 fetch 필요)
+            ibd_tickers = IBD_INDEXES_KR if market == "KR" else IBD_INDEXES_US
+            try:
+                if market == "KR":
+                    await self._price_cache.bulk_load_from_pykrx(ibd_tickers, days=70)
+                else:
+                    await self._price_cache.bulk_load_from_yfinance(ibd_tickers, period="3mo")
+                logger.info("ibd_price_refreshed", market=market, tickers=ibd_tickers)
+            except Exception:
+                logger.exception("ibd_price_refresh_error", market=market)
+
             ibd = IBDMarketDirection(self._db, self._price_cache, market=market)
             result = await ibd.update()
             if result:

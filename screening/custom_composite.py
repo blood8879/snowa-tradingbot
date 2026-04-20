@@ -189,15 +189,28 @@ class CompositeScoreCalculator:
         """Score quarterly EPS: most recent quarter vs. same quarter last year."""
         quarters = await self._fundamentals.get_quarterly_eps(ticker, limit=8)
 
-        if len(quarters) < 5:
-            # Need at least 5 quarters to compare YoY (Q0 vs Q4)
+        if len(quarters) < 2:
             return 50.0
 
         # quarters are descending by period: [newest, ..., oldest]
+        current_period = quarters[0][0]  # e.g., "2025Q4"
         latest_eps = quarters[0][1]
-        yoy_eps = quarters[4][1]  # Same quarter, one year ago
 
-        if yoy_eps == 0 or yoy_eps is None:
+        # Match by period name instead of index to handle NULL gaps
+        try:
+            year_str = current_period[:4]
+            q_suffix = current_period[4:]  # "Q4", "Q3", etc.
+            year_ago_period = f"{int(year_str) - 1}{q_suffix}"
+        except (ValueError, IndexError):
+            return 50.0
+
+        yoy_eps = None
+        for period, eps in quarters:
+            if period == year_ago_period:
+                yoy_eps = eps
+                break
+
+        if yoy_eps is None or yoy_eps == 0:
             return 50.0
 
         growth = (latest_eps - yoy_eps) / abs(yoy_eps)

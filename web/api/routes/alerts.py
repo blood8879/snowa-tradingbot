@@ -207,7 +207,7 @@ async def get_near_exit_alerts(
 
     pos_cursor = await db.conn.execute(
         f"""
-        SELECT p.id, p.ticker, p.system, p.avg_entry_price, w.name
+        SELECT p.id, p.ticker, p.system, p.avg_entry_price, w.name, p.current_stop_price
         FROM positions p
         LEFT JOIN watchlist w ON w.ticker = p.ticker
         WHERE p.status = 'OPEN'
@@ -227,6 +227,7 @@ async def get_near_exit_alerts(
         stock_name = row[4] or kr_names_exit.get(ticker)
         system = row[2] or "S1"
         entry_price = row[3]
+        current_stop_price = row[5]
 
         prices_cursor = await db.conn.execute(
             """
@@ -285,6 +286,7 @@ async def get_near_exit_alerts(
             "system": system,
             "donchian_lower_10": round(donchian_lower_10, 2),
             "donchian_lower_20": round(donchian_lower_20, 2),
+            "current_stop_price": round(current_stop_price, 2) if current_stop_price else None,
             "exit_proximity_pct": round(exit_proximity_pct, 2),
             "exit_level": exit_level,
         })

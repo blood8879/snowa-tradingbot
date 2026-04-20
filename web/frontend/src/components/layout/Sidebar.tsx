@@ -36,9 +36,20 @@ const NAV_ITEMS: NavItem[] = [
   { to: '/logs', icon: ScrollText, label: '봇 로그' },
 ];
 
-export function Sidebar() {
+interface SidebarProps {
+  mobileOpen?: boolean;
+  onClose?: () => void;
+}
+
+export function Sidebar({ mobileOpen = false, onClose }: SidebarProps) {
   return (
-    <aside className="fixed left-0 top-0 h-screen w-56 bg-panel border-r border-slate-700/50 flex flex-col">
+    <aside
+      className={clsx(
+        'fixed left-0 top-0 h-screen w-56 bg-panel border-r border-slate-700/50 flex flex-col z-40 transform transition-transform duration-200',
+        mobileOpen ? 'translate-x-0' : '-translate-x-full',
+        'md:translate-x-0',
+      )}
+    >
       <div className="px-5 py-6">
         <h1 className="text-xl font-bold">
           <span className="text-blue-400">SN</span>
@@ -48,12 +59,13 @@ export function Sidebar() {
 
       <MarketSelector />
 
-      <nav className="flex-1 px-3 space-y-1">
+      <nav className="flex-1 px-3 space-y-1 overflow-y-auto scrollbar-thin">
         {NAV_ITEMS.map((item) => (
           <NavLink
             key={item.to}
             to={item.to}
             end={item.end}
+            onClick={onClose}
             className={({ isActive }) =>
               clsx(
                 'flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-colors',

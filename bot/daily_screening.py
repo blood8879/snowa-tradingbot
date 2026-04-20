@@ -130,14 +130,59 @@ class DailyScreeningPipeline:
             fdm = FundamentalDataManager(self._db)
 
             if market == "KR":
+                # KR: 기존 watchlist 종목의 DART 재무데이터 선제 갱신
+                import os
+                DART_API_KEY = os.environ.get("DART_API_KEY", "a9a83a37044c92dda80876d98c108d112c89136b")
+
                 result["earnings_targets"] = 0
-                result["stale_targets"] = 0
-                result["fundamental_new_records"] = 0
-                logger.info(
-                    "daily_screening_kr_fundamentals_skipped",
-                    market=market,
-                    reason="DART handles KR fundamentals in screening step",
-                )
+                stale_kr: list[str] = []
+
+                if DART_API_KEY:
+                    cursor = await self._db.conn.execute(
+                        "SELECT ticker FROM watchlist WHERE status = 'ACTIVE' AND market = ?",
+                        (market,),
+                    )
+                    wl_rows = await cursor.fetchall()
+                    wl_tickers = [row[0] for row in wl_rows]
+
+                    for ticker in wl_tickers:
+                        try:
+                            if await fdm.needs_update(ticker, market=market):
+                                stale_kr.append(ticker)
+                        except Exception:
+                            stale_kr.append(ticker)
+
+                    result["stale_targets"] = len(stale_kr)
+
+                    if stale_kr:
+                        from data.dart_financial import DartFinancialFetcher
+
+                        dart = DartFinancialFetcher(
+                            api_key=DART_API_KEY,
+                            cache_dir=str(self._db.db_path.parent) if hasattr(self._db, "db_path") else "data",
+                        )
+                        await dart.load_corp_codes()
+                        dart_new = await dart.bulk_fetch_and_store(stale_kr, self._db)
+                        result["fundamental_new_records"] = dart_new
+                    else:
+                        result["fundamental_new_records"] = 0
+
+                    logger.info(
+                        "daily_screening_kr_fundamentals_refreshed",
+                        market=market,
+                        watchlist_count=len(wl_tickers),
+                        stale=len(stale_kr),
+                        new_records=result["fundamental_new_records"],
+                        elapsed=f"{time.monotonic() - fund_start:.1f}s",
+                    )
+                else:
+                    result["stale_targets"] = 0
+                    result["fundamental_new_records"] = 0
+                    logger.info(
+                        "daily_screening_kr_fundamentals_skipped",
+                        market=market,
+                        reason="DART_API_KEY not configured",
+                    )
             else:
                 # 3a: Earnings Calendar — 최근 실적 발표 종목
                 earnings_start = time.monotonic()
@@ -172,6 +217,17 @@ class DailyScreeningPipeline:
                             stale_targets.append(ticker)
                     except Exception:
                         pass
+
+                # Cap stale targets to prevent multi-hour fetch on first run
+                MAX_STALE_TARGETS = 500
+                if len(stale_targets) > MAX_STALE_TARGETS:
+                    logger.warning(
+                        "daily_screening_stale_targets_capped",
+                        original=len(stale_targets),
+                        capped=MAX_STALE_TARGETS,
+                        market=market,
+                    )
+                    stale_targets = stale_targets[:MAX_STALE_TARGETS]
 
                 result["stale_targets"] = len(stale_targets)
                 logger.info(

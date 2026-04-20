@@ -184,9 +184,10 @@ class FundamentalDataManager:
                 )
                 await asyncio.sleep(delay)
 
-        # Retry pass for tickers that returned empty data
+        # Retry pass for tickers that returned empty data (capped to avoid long delays)
+        MAX_RETRY = 30
         if empty_tickers and market == "US":
-            retry_count = min(len(empty_tickers), 200)
+            retry_count = min(len(empty_tickers), MAX_RETRY)
             retry_targets = empty_tickers[:retry_count]
             logger.info(
                 "bulk_fetch_retry_start",
@@ -198,15 +199,11 @@ class FundamentalDataManager:
             retry_total = 0
             still_empty = 0
             for idx, ticker in enumerate(retry_targets, start=1):
-                # Longer delay on retry to avoid rate limits
-                await asyncio.sleep(1.5)
+                await asyncio.sleep(0.8)
                 count = await self.fetch_and_store_fundamentals(ticker, market=market)
                 retry_total += count
                 if count == 0:
                     still_empty += 1
-
-                if idx % 50 == 0:
-                    await asyncio.sleep(delay * 2)
 
             total += retry_total
             logger.info(

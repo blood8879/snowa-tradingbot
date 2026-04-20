@@ -48,6 +48,8 @@ export interface Position {
   total_cost: number;
   avg_entry_price: number;
   current_stop_price: number;
+  donchian_lower_10: number | null;
+  donchian_lower_20: number | null;
   n_at_entry: number;
   sector: string | null;
   industry: string | null;
@@ -119,6 +121,27 @@ export interface WatchlistResponse {
   market?: string;
 }
 
+export interface WatchlistHistoryEntry {
+  id: number;
+  ticker: string;
+  name: string | null;
+  market: string;
+  action: 'ADDED' | 'REMOVED';
+  reason: string | null;
+  quarterly_eps_growth: number | null;
+  annual_eps_cagr: number | null;
+  rs_rating: number | null;
+  composite_score: number | null;
+  minervini_pass: boolean | null;
+  recorded_at: string;
+}
+
+export interface WatchlistHistoryResponse {
+  history: WatchlistHistoryEntry[];
+  total: number;
+  market: string;
+}
+
 // ── GET /api/trades ──────────────────────────────
 
 export interface Trade {
@@ -185,6 +208,7 @@ export interface JournalTrade {
   name?: string | null;
   system: string;
   realized_pnl: number;
+  realized_pnl_pct: number;
   opened_at: string;
   closed_at: string;
   close_reason: string;
@@ -193,10 +217,13 @@ export interface JournalTrade {
   exit_price: number;
   total_shares: number;
   risk_per_share: number;
+  holding_days: number | null;
 }
 
 export interface JournalResponse {
   month: string;
+  start_month: string;
+  end_month: string;
   stats: {
     total_trades: number;
     winners: number;
@@ -209,6 +236,9 @@ export interface JournalResponse {
     monthly_pnl: number;
     min_equity: number;
     max_equity: number;
+    avg_holding_days: number;
+    avg_win_holding_days: number;
+    avg_loss_holding_days: number;
   };
   trades: JournalTrade[];
 }
@@ -390,6 +420,7 @@ export interface ExitAlert {
   system: string;
   donchian_lower_10: number;
   donchian_lower_20: number;
+  current_stop_price: number | null;
   exit_proximity_pct: number;
   exit_level: 'critical' | 'warning' | 'safe';
 }

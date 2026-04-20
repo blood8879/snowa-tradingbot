@@ -131,9 +131,18 @@ SHORT_MARKET_CONDITION: str = "BELOW_MA"     # Short only when SPY < 200MA
 # CANSLIM Stock Selection Thresholds
 # (Detail in QUANTIFIED_STRATEGY.md)
 # ============================================================
-CANSLIM_MIN_QUARTERLY_EPS_GROWTH: float = 0.25    # C: +25% YoY minimum
-CANSLIM_MIN_ANNUAL_EPS_CAGR: float = 0.25         # A: +25% 5-year CAGR
-CANSLIM_MIN_RS_RATING: int = 80                    # L: RS Rating ≥ 80
+CANSLIM_MIN_QUARTERLY_EPS_GROWTH: float = 0.25    # C: +25% YoY minimum (진입)
+CANSLIM_MIN_ANNUAL_EPS_CAGR: float = 0.25         # A: +25% 5-year CAGR (진입)
+CANSLIM_MIN_RS_RATING: int = 80                    # L: RS Rating ≥ 80 (진입)
+
+# Hysteresis — 기존 watchlist 종목 유지 임계치 (진입보다 관대)
+# Why: 경계값에서 하루마다 토글되는 것을 방지. 한번 통과한 종목은
+#      완충지대까지 떨어지기 전엔 유지.
+CANSLIM_HOLD_QUARTERLY_EPS_GROWTH: float = 0.15   # 유지: +15% 이상이면 OK
+CANSLIM_HOLD_ANNUAL_EPS_CAGR: float = 0.15        # 유지: CAGR +15% 이상
+CANSLIM_HOLD_RS_RATING: int = 75                   # 유지: RS ≥ 75
+# Fallback: 데이터 결손 시 이전 스크리닝 값 사용 허용 기간
+SCREENING_FALLBACK_MAX_DAYS: int = 30             # 30일 이내 값만 fallback 허용
 CANSLIM_MIN_EPS_RATING: int = 80                   # EPS Rating ≥ 80
 CANSLIM_MIN_COMPOSITE_RATING: int = 90             # Composite Rating ≥ 90
 CANSLIM_MIN_INSTITUTIONAL_HOLDERS: int = 5         # I: Minimum 5 institutional holders
@@ -207,6 +216,12 @@ MINERVINI_200MA_UPTREND_DAYS: int = 22       # 200MA rising for at least 1 month
 MINERVINI_MIN_PRICE_VS_52W_LOW: float = 1.30 # Price ≥ 130% of 52-week low
 MINERVINI_MAX_PRICE_VS_52W_HIGH: float = 0.75  # Price within 25% of 52-week high (≥75%)
 MINERVINI_MIN_RS_RATING_TREND: int = 70      # RS Rating ≥ 70 (preferably ≥ 80)
+
+# Minervini Hysteresis — 기존 watchlist 종목은 8조건 중 일부만 통과해도 유지
+# Why: KR 시장은 변동성이 커서 8조건 전체를 매일 통과하기 어려움.
+#      단, 가격이 200MA를 이탈하면 추세 파괴로 무조건 탈락 (필수 조건).
+MINERVINI_HOLD_MIN_PASSED: int = 6            # 기존 종목은 8개 중 6개 통과하면 유지
+MINERVINI_HOLD_MANDATORY_COND_IDX: int = 2    # conditions[2] = price > 200MA (0-indexed)
 
 
 # ============================================================

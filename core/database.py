@@ -240,6 +240,26 @@ CREATE INDEX IF NOT EXISTS idx_bot_logs_ts ON bot_logs(timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_bot_logs_level ON bot_logs(level);
 
 -- ===================================================================
+-- 11. Watchlist history (add/remove log with reasons)
+-- ===================================================================
+CREATE TABLE IF NOT EXISTS watchlist_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ticker TEXT NOT NULL,
+    name TEXT,
+    market TEXT NOT NULL DEFAULT 'US',
+    action TEXT NOT NULL,  -- 'ADDED' or 'REMOVED'
+    reason TEXT,
+    quarterly_eps_growth REAL,
+    annual_eps_cagr REAL,
+    rs_rating REAL,
+    composite_score REAL,
+    minervini_pass INTEGER,
+    recorded_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_watchlist_history_market_date ON watchlist_history(market, recorded_at DESC);
+
+-- ===================================================================
 -- Schema version tracking
 -- ===================================================================
 CREATE TABLE IF NOT EXISTS schema_version (

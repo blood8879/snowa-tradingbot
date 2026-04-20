@@ -91,8 +91,20 @@ class AccountManager:
         except Exception as exc:
             logger.warning("get_balance_failed", error=str(exc), exc_info=True)
 
+        # 미체결 주문 예약금을 equity에 포함 (cash에서 차감되었으나 position에 미반영)
+        pending_order_value = 0.0
+        try:
+            cursor = await self._db.conn.execute(
+                "SELECT SUM(requested_shares * requested_price) FROM orders WHERE status = 'SUBMITTED' AND side = 'BUY' AND NOT (length(ticker) = 6 AND ticker GLOB '[0-9]*')"
+            )
+            row = await cursor.fetchone()
+            if row and row[0]:
+                pending_order_value = float(row[0])
+        except Exception as exc:
+            logger.warning("pending_order_value_failed", error=str(exc), exc_info=True)
+
         info = AccountInfo(
-            total_equity=cash + total_position_value,
+            total_equity=cash + total_position_value + pending_order_value,
             cash_balance=cash,
             total_positions_value=total_position_value,
             currency="USD",
@@ -147,6 +159,20 @@ class AccountManager:
             total_equity = tot_evlu if tot_evlu > 0 else cash + total_position_value
         except Exception as exc:
             logger.warning("get_kr_balance_failed", error=str(exc), exc_info=True)
+
+        # 미체결 주문 예약금을 equity에 포함
+        pending_order_value = 0.0
+        try:
+            cursor = await self._db.conn.execute(
+                "SELECT SUM(requested_shares * requested_price) FROM orders WHERE status = 'SUBMITTED' AND side = 'BUY' AND length(ticker) = 6 AND ticker GLOB '[0-9]*'"
+            )
+            row = await cursor.fetchone()
+            if row and row[0]:
+                pending_order_value = float(row[0])
+        except Exception as exc:
+            logger.warning("pending_order_value_kr_failed", error=str(exc), exc_info=True)
+
+        total_equity += pending_order_value
 
         info = AccountInfo(
             total_equity=total_equity,

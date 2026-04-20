@@ -539,8 +539,8 @@ class KISWebSocket:
                             ok_count += 1
                     except Exception:
                         err_count += 1
-                    # KIS API 초당 제한 방지 (종목간 1초 간격)
-                    await asyncio.sleep(1.0)
+                    # KIS API 초당 제한 방지 (종목간 2초 간격, fill check 여유 확보)
+                    await asyncio.sleep(2.0)
                 logger.info(
                     "rest_polling_cycle_done",
                     cycle=cycle,

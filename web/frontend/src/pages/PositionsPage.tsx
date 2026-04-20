@@ -99,6 +99,26 @@ function getPositionColumns(market: string): Column<Position>[] {
       ),
     },
     {
+      key: 'donchian_lower_10',
+      header: 'S1청산가',
+      render: (row) =>
+        row.donchian_lower_10 != null ? (
+          <span className="text-slate-300 tabular-nums">{formatPrice(row.donchian_lower_10, market)}</span>
+        ) : (
+          <span className="text-slate-500">—</span>
+        ),
+    },
+    {
+      key: 'donchian_lower_20',
+      header: 'S2청산가',
+      render: (row) =>
+        row.donchian_lower_20 != null ? (
+          <span className="text-slate-300 tabular-nums">{formatPrice(row.donchian_lower_20, market)}</span>
+        ) : (
+          <span className="text-slate-500">—</span>
+        ),
+    },
+    {
       key: 'unrealized_pnl',
       header: '손익',
       render: (row) =>

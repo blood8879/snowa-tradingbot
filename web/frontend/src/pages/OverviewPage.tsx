@@ -189,7 +189,7 @@ export function OverviewPage() {
                 <ul className="list-disc list-inside space-y-1 text-slate-400">
                   <li><span className="text-slate-200">US</span>: SPY 종가 &gt; SPY 200일 SMA</li>
                   <li><span className="text-slate-200">KR</span>: KODEX200(069500) 종가 &gt; 200일 SMA</li>
-                  <li>200 SMA 아래이면 무조건 <span className="text-red-400 font-semibold">RED</span> (신규 진입 차단)</li>
+                  <li>200 SMA 아래이면 <span className="text-yellow-400 font-semibold">YELLOW</span> (유닛 50% 축소, 단독으로 RED 아님)</li>
                 </ul>
               </div>
 
@@ -269,16 +269,16 @@ export function OverviewPage() {
                         <td className="py-1.5 px-2">진입 허용, 유닛 50%</td>
                       </tr>
                       <tr className="border-b border-slate-700/50">
-                        <td className="py-1.5 px-2">O</td>
-                        <td className="py-1.5 px-2">&lt;35%</td>
-                        <td className="py-1.5 px-2">&lt;-5%</td>
-                        <td className="py-1.5 px-2"><span className="text-red-400 font-bold">RED</span></td>
-                        <td className="py-1.5 px-2">신규 진입 차단</td>
-                      </tr>
-                      <tr>
                         <td className="py-1.5 px-2">X</td>
                         <td className="py-1.5 px-2">-</td>
                         <td className="py-1.5 px-2">-</td>
+                        <td className="py-1.5 px-2"><span className="text-yellow-400 font-bold">YELLOW</span></td>
+                        <td className="py-1.5 px-2">진입 허용, 유닛 50%</td>
+                      </tr>
+                      <tr>
+                        <td className="py-1.5 px-2">O/X</td>
+                        <td className="py-1.5 px-2">&lt;35%</td>
+                        <td className="py-1.5 px-2">&lt;-5%</td>
                         <td className="py-1.5 px-2"><span className="text-red-400 font-bold">RED</span></td>
                         <td className="py-1.5 px-2">신규 진입 차단</td>
                       </tr>
@@ -453,10 +453,26 @@ export function OverviewPage() {
           value={status?.regime ?? status?.market_filter ?? '—'}
           delta={
             status?.benchmark?.close && status?.benchmark?.sma200
-              ? `${status.benchmark.name} ${currencySymbol(market)}${status.benchmark.close.toLocaleString(undefined, { maximumFractionDigits: 0 })} / SMA200 ${currencySymbol(market)}${status.benchmark.sma200.toLocaleString(undefined, { maximumFractionDigits: 0 })}${status?.breadth_pct != null ? ` | 브레드스 ${(status.breadth_pct * 100).toFixed(1)}%` : ''}${status?.roc != null ? ` | ROC ${(status.roc * 100).toFixed(1)}%` : ''}`
+              ? <>
+                  <span className={status.benchmark.close > status.benchmark.sma200 ? 'text-green-400' : 'text-yellow-400'}>
+                    {status.benchmark.name} {currencySymbol(market)}{status.benchmark.close.toLocaleString(undefined, { maximumFractionDigits: 0 })} / SMA200 {currencySymbol(market)}{status.benchmark.sma200.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                  </span>
+                  {status?.breadth_pct != null && <>
+                    <span className="text-slate-500"> | </span>
+                    <span className={status.breadth_pct >= 0.55 ? 'text-green-400' : status.breadth_pct >= 0.35 ? 'text-yellow-400' : 'text-red-400'}>
+                      브레드스 {(status.breadth_pct * 100).toFixed(1)}%
+                    </span>
+                  </>}
+                  {status?.roc != null && <>
+                    <span className="text-slate-500"> | </span>
+                    <span className={status.roc >= -0.05 ? 'text-green-400' : 'text-red-400'}>
+                      ROC {(status.roc * 100).toFixed(1)}%
+                    </span>
+                  </>}
+                </>
               : status?.market_filter_pass ? '통과' : '미통과'
           }
-          deltaType={status?.regime === 'GREEN' ? 'positive' : status?.regime === 'RED' ? 'negative' : status?.market_filter_pass ? 'positive' : 'negative'}
+          deltaType="neutral"
         />
         <StatCard
           label="모드"

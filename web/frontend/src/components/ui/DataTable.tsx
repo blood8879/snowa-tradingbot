@@ -63,7 +63,7 @@ export function DataTable<T>({
               <th
                 key={col.key}
                 className={clsx(
-                  'px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase tracking-wide',
+                  'px-3 sm:px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase tracking-wide whitespace-nowrap',
                   col.sortable && 'cursor-pointer select-none hover:text-slate-200',
                   col.className,
                 )}
@@ -100,7 +100,7 @@ export function DataTable<T>({
                   {columns.map((col) => (
                     <td
                       key={col.key}
-                      className={clsx('px-4 py-3 text-sm', col.className)}
+                      className={clsx('px-3 sm:px-4 py-3 text-sm whitespace-nowrap', col.className)}
                     >
                       {col.render(row)}
                     </td>

@@ -7,9 +7,9 @@ Signals:
   3. Benchmark 125-day Rate of Change (momentum)
 
 Regime determination:
-  RED   — benchmark < 200 SMA, OR (breadth < 35% AND ROC < -5%)
-  YELLOW — one of breadth/ROC is weak
-  GREEN  — all signals healthy
+  RED    — breadth < 35% AND ROC < -5% (both must be bad)
+  YELLOW — benchmark < 200 SMA, OR one of breadth/ROC is weak
+  GREEN  — all signals healthy (SMA pass + breadth OK + ROC OK)
 
 Existing positions continue to be managed by Turtle exit rules.
 """
@@ -84,21 +84,21 @@ def determine_regime(
         (regime, scale) — regime is "GREEN"/"YELLOW"/"RED",
         scale is 1.0 / 0.5 / 0.0.
     """
-    # Hard rule: benchmark below 200 SMA = RED
-    if not sma_pass:
-        return "RED", 0.0
-
-    # If breadth/ROC unavailable, fall back to SMA-only (GREEN)
+    # If breadth/ROC unavailable, fall back to SMA-only
     breadth_ok = breadth_pct is None or breadth_pct >= MARKET_BREADTH_GREEN
     breadth_bad = breadth_pct is not None and breadth_pct < MARKET_BREADTH_RED
     roc_ok = roc is None or roc >= MARKET_ROC_WARNING
     roc_bad = roc is not None and roc < MARKET_ROC_WARNING
 
-    # Both bad → RED (even though SMA still above)
+    # Both breadth AND ROC bad → RED (regardless of SMA)
     if breadth_bad and roc_bad:
         return "RED", 0.0
 
-    # Both good → GREEN
+    # SMA failure alone → YELLOW (not RED)
+    if not sma_pass:
+        return "YELLOW", MARKET_REGIME_YELLOW_SCALE
+
+    # SMA pass + both good → GREEN
     if breadth_ok and roc_ok:
         return "GREEN", 1.0
 

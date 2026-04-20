@@ -119,17 +119,53 @@ function getJournalColumns(market: string): Column<JournalTrade>[] {
       ),
     },
     {
+      key: 'holding_days',
+      header: '보유일',
+      render: (row) => (
+        <span className="text-slate-300 tabular-nums">
+          {row.holding_days != null ? `${row.holding_days.toFixed(1)}일` : '—'}
+        </span>
+      ),
+    },
+    {
       key: 'realized_pnl',
       header: '손익',
       render: (row) => <PnlText value={row.realized_pnl} prefix={currencySymbol(market)} />,
     },
+    {
+      key: 'realized_pnl_pct',
+      header: '수익률',
+      render: (row) => {
+        const v = row.realized_pnl_pct;
+        const sign = v > 0 ? '+' : '';
+        const color =
+          v > 0 ? 'text-profit' : v < 0 ? 'text-loss' : 'text-slate-400';
+        return (
+          <span className={`tabular-nums font-medium ${color}`}>
+            {`${sign}${v.toFixed(2)}%`}
+          </span>
+        );
+      },
+    },
   ];
 }
 
+type RangeMode = 'month' | 'range' | 'all';
+
 export function JournalPage() {
   const { market } = useMarket();
+  const [rangeMode, setRangeMode] = useState<RangeMode>('month');
   const [selectedMonth, setSelectedMonth] = useState(currentMonth);
-  const { data, isLoading, error } = useJournal(selectedMonth, market);
+  const [startMonth, setStartMonth] = useState(currentMonth);
+  const [endMonth, setEndMonth] = useState(currentMonth);
+
+  const journalParams = useMemo(() => {
+    if (rangeMode === 'all') return { allTime: true };
+    if (rangeMode === 'range') return { startMonth, endMonth };
+    return { month: selectedMonth };
+  }, [rangeMode, selectedMonth, startMonth, endMonth]);
+
+  const { data, isLoading, error } = useJournal(journalParams, market);
   const journalCols = useMemo(() => getJournalColumns(market), [market]);
 
   if (isLoading) {
@@ -158,15 +194,79 @@ export function JournalPage() {
     ? formatPnlValue(stats.monthly_pnl, market)
     : '—';
 
+  const rangeLabel =
+    rangeMode === 'all'
+      ? data?.start_month && data?.end_month
+        ? `${data.start_month} ~ ${data.end_month} (전체)`
+        : '전체 기간'
+      : rangeMode === 'range'
+        ? `${startMonth} ~ ${endMonth}`
+        : selectedMonth;
+
+  const modeBtnClass = (active: boolean) =>
+    `px-3 py-1.5 text-sm rounded-lg border transition ${
+      active
+        ? 'bg-blue-500/20 border-blue-500 text-blue-200'
+        : 'bg-slate-800 border-slate-600 text-slate-300 hover:bg-slate-700'
+    }`;
+
+  const periodPnlLabel = rangeMode === 'month' ? '월간 손익' : '기간 손익';
+
   return (
     <div className="space-y-6">
-      <PageHeader title="매매일지" subtitle="월별 매매 성과 분석">
-        <input
-          type="month"
-          value={selectedMonth}
-          onChange={(e) => setSelectedMonth(e.target.value)}
-          className="bg-slate-800 border border-slate-600 rounded-lg px-3 py-1.5 text-sm text-slate-200"
-        />
+      <PageHeader title="매매일지" subtitle={`매매 성과 분석 · ${rangeLabel}`}>
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="flex items-center gap-1">
+            <button
+              type="button"
+              onClick={() => setRangeMode('month')}
+              className={modeBtnClass(rangeMode === 'month')}
+            >
+              월별
+            </button>
+            <button
+              type="button"
+              onClick={() => setRangeMode('range')}
+              className={modeBtnClass(rangeMode === 'range')}
+            >
+              기간
+            </button>
+            <button
+              type="button"
+              onClick={() => setRangeMode('all')}
+              className={modeBtnClass(rangeMode === 'all')}
+            >
+              전체
+            </button>
+          </div>
+          {rangeMode === 'month' && (
+            <input
+              type="month"
+              value={selectedMonth}
+              onChange={(e) => setSelectedMonth(e.target.value)}
+              className="bg-slate-800 border border-slate-600 rounded-lg px-3 py-1.5 text-sm text-slate-200"
+            />
+          )}
+          {rangeMode === 'range' && (
+            <div className="flex items-center gap-1.5">
+              <input
+                type="month"
+                value={startMonth}
+                max={endMonth}
+                onChange={(e) => setStartMonth(e.target.value)}
+                className="bg-slate-800 border border-slate-600 rounded-lg px-3 py-1.5 text-sm text-slate-200"
+              />
+              <span className="text-slate-500 text-sm">~</span>
+              <input
+                type="month"
+                value={endMonth}
+                min={startMonth}
+                onChange={(e) => setEndMonth(e.target.value)}
+                className="bg-slate-800 border border-slate-600 rounded-lg px-3 py-1.5 text-sm text-slate-200"
+              />
+            </div>
+          )}
+        </div>
       </PageHeader>
 
       {/* Stats Grid */}
@@ -199,7 +299,7 @@ export function JournalPage() {
           value={stats ? stats.risk_reward_ratio.toFixed(2) : '—'}
         />
         <StatCard
-          label="월간 손익"
+          label={periodPnlLabel}
           value={monthlyPnlStr}
           deltaType={
             stats
@@ -210,6 +310,20 @@ export function JournalPage() {
                   : 'neutral'
               : 'neutral'
           }
+        />
+        <StatCard
+          label="평균 보유일"
+          value={stats ? `${stats.avg_holding_days.toFixed(1)}일` : '—'}
+        />
+        <StatCard
+          label="승리 평균 보유일"
+          value={stats ? `${stats.avg_win_holding_days.toFixed(1)}일` : '—'}
+          deltaType="positive"
+        />
+        <StatCard
+          label="패배 평균 보유일"
+          value={stats ? `${stats.avg_loss_holding_days.toFixed(1)}일` : '—'}
+          deltaType="negative"
         />
       </div>
 
@@ -295,7 +409,7 @@ export function JournalPage() {
           columns={journalCols}
           data={trades}
           rowKey={(row) => `${row.ticker}-${row.opened_at}`}
-          emptyMessage="이 달의 매매 기록이 없습니다"
+          emptyMessage="해당 기간의 매매 기록이 없습니다"
         />
       </div>
     </div>

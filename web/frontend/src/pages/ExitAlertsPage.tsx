@@ -112,6 +112,18 @@ function getColumns(market: string): ExitAlertColumn[] {
       },
     },
     {
+      key: 'current_stop_price',
+      header: '손절가',
+      render: (row) =>
+        row.current_stop_price != null ? (
+          <span className="text-amber-300 tabular-nums font-medium">
+            {formatPrice(row.current_stop_price, market)}
+          </span>
+        ) : (
+          <span className="text-slate-500">—</span>
+        ),
+    },
+    {
       key: 'donchian_lower_10',
       header: 'S1 청산가',
       render: (row) => (

@@ -170,6 +170,28 @@ async def get_positions(
         bp for bp in broker_positions if bp["ticker"] not in db_tickers
     ]
 
+    # Donchian 청산가 계산 (S1: 10일 저가, S2: 20일 저가)
+    for pos in db_positions:
+        ticker = pos["ticker"]
+        prices_cursor = await db.conn.execute(
+            """
+            SELECT low FROM daily_prices
+            WHERE ticker = ?
+            ORDER BY date DESC
+            LIMIT 20
+            """,
+            (ticker,),
+        )
+        price_rows = await prices_cursor.fetchall()
+        if price_rows:
+            lows_10 = [r[0] for r in price_rows[:10]] if len(price_rows) >= 10 else [r[0] for r in price_rows]
+            lows_20 = [r[0] for r in price_rows[:20]] if len(price_rows) >= 20 else [r[0] for r in price_rows]
+            pos["donchian_lower_10"] = round(min(lows_10), 2)
+            pos["donchian_lower_20"] = round(min(lows_20), 2)
+        else:
+            pos["donchian_lower_10"] = None
+            pos["donchian_lower_20"] = None
+
     # 종목명 로드
     all_tickers = db_tickers | {bp["ticker"] for bp in broker_only}
     if all_tickers:

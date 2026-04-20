@@ -478,11 +478,15 @@ class OrderExecutor:
                     try:
                         kr_balance = await self._rest.get_balance(market="KR")
                         broker_holdings: dict[str, int] = {}
+                        broker_avg_prices: dict[str, float] = {}
                         for bp in kr_balance.get("positions", []):
                             pdno = bp.get("pdno", "")
                             qty = int(float(bp.get("hldg_qty", 0)))
                             if pdno and qty > 0:
                                 broker_holdings[pdno] = qty
+                                avg_prc = float(bp.get("pchs_avg_pric", 0))
+                                if avg_prc > 0:
+                                    broker_avg_prices[pdno] = avg_prc
 
                         # DB 포지션 현재 수량 조회 (sync_positions 이중 반영 방지)
                         db_pos_shares: dict[str, int] = {}
@@ -494,6 +498,7 @@ class OrderExecutor:
 
                         for order_key, order in list(kr_pending.items()):
                             broker_qty = broker_holdings.get(order.ticker, 0)
+                            db_shares = db_pos_shares.get(order.ticker, 0)
                             if broker_qty <= 0:
                                 if order.side == OrderSide.SELL:
                                     # 매도 후 잔고 0 = 체결
@@ -502,8 +507,13 @@ class OrderExecutor:
                                     continue
 
                             if order.side == OrderSide.BUY:
+                                # Guard: broker must show MORE shares than DB to confirm fill
+                                if broker_qty <= db_shares:
+                                    continue
                                 fill_qty = order.requested_shares
-                                fill_price = order.requested_price
+                                # Use broker avg cost if available, else original price (without buffer)
+                                broker_avg = broker_avg_prices.get(order.ticker)
+                                fill_price = broker_avg if broker_avg else order.requested_price
                             else:
                                 fill_qty = order.requested_shares
                                 fill_price = order.requested_price
@@ -624,7 +634,36 @@ class OrderExecutor:
                 # 매도 주문(STOP_LOSS/EXIT)은 30분, 매수 주문은 2시간 후 만료
                 expire_seconds = 1800 if order.side == OrderSide.SELL else 7200
                 if age_s > expire_seconds and (order.filled_shares or 0) == 0:
-                    order.status = OrderStatus.FAILED
+                    # broker에 취소 요청 전송
+                    if order.broker_order_id:
+                        try:
+                            cursor = await self._db.conn.execute(
+                                "SELECT exchange FROM watchlist WHERE ticker = ?",
+                                (order.ticker,),
+                            )
+                            row = await cursor.fetchone()
+                            exchange = row[0] if row else "NASD"
+                            await self._rest.cancel_order(
+                                order_no=order.broker_order_id,
+                                ticker=order.ticker,
+                                exchange=exchange,
+                                quantity=order.requested_shares,
+                            )
+                            logger.info(
+                                "broker_cancel_sent",
+                                order_id=order.id,
+                                ticker=order.ticker,
+                                broker_order_id=order.broker_order_id,
+                            )
+                        except Exception as cancel_exc:
+                            logger.warning(
+                                "broker_cancel_failed",
+                                order_id=order.id,
+                                ticker=order.ticker,
+                                error=str(cancel_exc),
+                            )
+
+                    order.status = OrderStatus.CANCELLED
                     order.updated_at = _now_iso()
                     order.notes = json.dumps({
                         **(json.loads(order.notes) if order.notes else {}),

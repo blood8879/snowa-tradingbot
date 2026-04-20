@@ -82,6 +82,62 @@ async def _calc_avg_volume_50d(db: Database, ticker: str) -> float | None:
     return round(row[0]) if row and row[0] is not None else None
 
 
+@router.get("/watchlist/history", dependencies=[Depends(verify_api_key)])
+async def get_watchlist_history(
+    market: str = Query(default="US", description="Market filter (US, KR, ALL)"),
+    limit: int = Query(default=100, description="Max records to return"),
+    db: Database = Depends(get_db),
+) -> dict:
+    """Return watchlist add/remove history."""
+    params: list = []
+    market_clause = ""
+    if market and market != "ALL":
+        market_clause = "AND market = ?"
+        params.append(market)
+    params.append(limit)
+
+    cursor = await db.conn.execute(
+        f"""
+        SELECT id, ticker, name, market, action, reason,
+               quarterly_eps_growth, annual_eps_cagr, rs_rating,
+               composite_score, minervini_pass, recorded_at
+        FROM watchlist_history
+        WHERE 1=1 {market_clause}
+        ORDER BY recorded_at DESC
+        LIMIT ?
+        """,
+        params,
+    )
+    rows = await cursor.fetchall()
+
+    # KR 종목명 CSV fallback
+    kr_names = _load_kr_stock_names() if market in ("KR", "ALL") else {}
+
+    history = []
+    for r in rows:
+        name = r[2] or kr_names.get(r[1])
+        history.append({
+            "id": r[0],
+            "ticker": r[1],
+            "name": name,
+            "market": r[3],
+            "action": r[4],
+            "reason": r[5],
+            "quarterly_eps_growth": r[6],
+            "annual_eps_cagr": r[7],
+            "rs_rating": r[8],
+            "composite_score": r[9],
+            "minervini_pass": bool(r[10]) if r[10] is not None else None,
+            "recorded_at": r[11],
+        })
+
+    return {
+        "history": history,
+        "total": len(history),
+        "market": market,
+    }
+
+
 @router.get("/watchlist", dependencies=[Depends(verify_api_key)])
 async def get_watchlist(
     market: str = Query(default="US", description="Market filter"),

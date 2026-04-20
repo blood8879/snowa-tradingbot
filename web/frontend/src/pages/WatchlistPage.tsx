@@ -5,10 +5,11 @@ import { DataTable } from '@/components/ui/DataTable';
 import { Badge } from '@/components/ui/Badge';
 import { LoadingSpinner } from '@/components/ui/LoadingSpinner';
 import { useWatchlist } from '@/hooks/useWatchlist';
+import { useWatchlistHistory } from '@/hooks/useWatchlistHistory';
 import { useRealtimePrices } from '@/hooks/useRealtimePrices';
 import { useMarket } from '@/hooks/useMarket';
 import type { Column } from '@/components/ui/DataTable';
-import type { WatchlistStock, RealtimePricesResponse } from '@/types/api';
+import type { WatchlistStock, RealtimePricesResponse, WatchlistHistoryEntry } from '@/types/api';
 
 function formatPct(value: number | null): string {
   if (value == null) return '—';
@@ -272,6 +273,105 @@ function sortWatchlist(
   return sorted;
 }
 
+function formatRecordedAt(dateStr: string): string {
+  const d = new Date(dateStr);
+  const yy = String(d.getFullYear()).slice(2);
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  const hh = String(d.getHours()).padStart(2, '0');
+  const min = String(d.getMinutes()).padStart(2, '0');
+  return `${yy}/${mm}/${dd} ${hh}:${min}`;
+}
+
+function HistorySection({ market }: { market: string }) {
+  const [open, setOpen] = useState(false);
+  const { data, isLoading } = useWatchlistHistory(market, 50);
+
+  const history: WatchlistHistoryEntry[] = data?.history ?? [];
+
+  return (
+    <div className="bg-panel rounded-xl border border-slate-700/50 overflow-hidden">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="w-full flex items-center justify-between px-5 py-3.5 text-left hover:bg-slate-700/30 transition-colors"
+      >
+        <span className="text-sm font-semibold text-slate-200">
+          변동 이력
+          {data?.total != null && (
+            <span className="ml-2 text-xs font-normal text-slate-500">({data.total}건)</span>
+          )}
+        </span>
+        <span className="text-slate-400 text-xs select-none">{open ? '▲ 접기' : '▼ 펼치기'}</span>
+      </button>
+
+      {open && (
+        <div className="border-t border-slate-700/50 overflow-x-auto">
+          {isLoading ? (
+            <div className="py-8 flex justify-center">
+              <LoadingSpinner />
+            </div>
+          ) : history.length === 0 ? (
+            <p className="py-8 text-center text-sm text-slate-500">이력이 없습니다</p>
+          ) : (
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-slate-700/50 bg-slate-800/40">
+                  <th className="px-4 py-2.5 text-left text-xs font-medium text-slate-400 whitespace-nowrap">일시</th>
+                  <th className="px-4 py-2.5 text-left text-xs font-medium text-slate-400 whitespace-nowrap">종목</th>
+                  <th className="px-4 py-2.5 text-left text-xs font-medium text-slate-400 whitespace-nowrap">변동</th>
+                  <th className="px-4 py-2.5 text-left text-xs font-medium text-slate-400 whitespace-nowrap">사유</th>
+                  <th className="px-4 py-2.5 text-right text-xs font-medium text-slate-400 whitespace-nowrap">EPS성장률</th>
+                  <th className="px-4 py-2.5 text-right text-xs font-medium text-slate-400 whitespace-nowrap">RS등급</th>
+                  <th className="px-4 py-2.5 text-right text-xs font-medium text-slate-400 whitespace-nowrap">종합점수</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-700/30">
+                {history.map((entry) => (
+                  <tr key={entry.id} className="hover:bg-slate-700/20 transition-colors">
+                    <td className="px-4 py-2.5 text-xs text-slate-400 tabular-nums whitespace-nowrap">
+                      {formatRecordedAt(entry.recorded_at)}
+                    </td>
+                    <td className="px-4 py-2.5 whitespace-nowrap">
+                      <span className="font-semibold text-slate-100">{entry.ticker}</span>
+                      {entry.name && (
+                        <span className="ml-1.5 text-xs font-normal text-slate-400">{entry.name}</span>
+                      )}
+                    </td>
+                    <td className="px-4 py-2.5 whitespace-nowrap">
+                      <Badge variant={entry.action === 'ADDED' ? 'success' : 'danger'}>
+                        {entry.action === 'ADDED' ? '추가' : '탈락'}
+                      </Badge>
+                    </td>
+                    <td className="px-4 py-2.5 text-xs text-slate-300 max-w-[180px] truncate">
+                      {entry.reason ?? '—'}
+                    </td>
+                    <td className="px-4 py-2.5 text-right tabular-nums text-xs text-slate-300">
+                      {entry.quarterly_eps_growth != null
+                        ? `${(entry.quarterly_eps_growth * 100).toFixed(1)}%`
+                        : '—'}
+                    </td>
+                    <td className="px-4 py-2.5 text-right tabular-nums text-xs">
+                      {entry.rs_rating != null ? (
+                        <span className={entry.rs_rating >= 90 ? 'text-emerald-400' : entry.rs_rating >= 80 ? 'text-green-400' : 'text-slate-300'}>
+                          {entry.rs_rating}
+                        </span>
+                      ) : '—'}
+                    </td>
+                    <td className="px-4 py-2.5 text-right tabular-nums text-xs text-slate-300">
+                      {entry.composite_score != null ? entry.composite_score.toFixed(0) : '—'}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function WatchlistPage() {
   const { market } = useMarket();
   const { data, isLoading, error } = useWatchlist(market);
@@ -352,6 +452,9 @@ export function WatchlistPage() {
           emptyMessage="관심종목이 없습니다"
         />
       </div>
+
+      {/* History Section */}
+      <HistorySection market={market} />
     </div>
   );
 }

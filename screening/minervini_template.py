@@ -29,6 +29,8 @@ from config.constants import (
     MINERVINI_MIN_PRICE_VS_52W_LOW,
     MINERVINI_200MA_UPTREND_DAYS,
     MINERVINI_MIN_RS_RATING_TREND,
+    MINERVINI_HOLD_MIN_PASSED,
+    MINERVINI_HOLD_MANDATORY_COND_IDX,
 )
 from data.market_data import MarketDataProvider
 
@@ -58,12 +60,27 @@ class TemplateResult:
 
     @property
     def passed_all(self) -> bool:
-        """True if ALL 8 mandatory conditions pass."""
+        """True if ALL 8 mandatory conditions pass (strict — for new entry)."""
         return all(c.passed for c in self.conditions)
 
     @property
     def passed_count(self) -> int:
         return sum(1 for c in self.conditions if c.passed)
+
+    @property
+    def passed_for_hold(self) -> bool:
+        """Hysteresis variant: existing watchlist ticker stays if ≥ MINERVINI_HOLD_MIN_PASSED
+        conditions pass AND the mandatory trend-anchor condition (price > 200MA) passes.
+
+        Why: KR 변동성에서 8/8 매일 유지 어려움. 단 추세 앵커(200MA)가 깨지면
+             보수적으로 탈락시킴.
+        """
+        if len(self.conditions) <= MINERVINI_HOLD_MANDATORY_COND_IDX:
+            return False
+        mandatory = self.conditions[MINERVINI_HOLD_MANDATORY_COND_IDX]
+        if not mandatory.passed:
+            return False
+        return self.passed_count >= MINERVINI_HOLD_MIN_PASSED
 
     @property
     def passed_with_rs(self) -> bool:
