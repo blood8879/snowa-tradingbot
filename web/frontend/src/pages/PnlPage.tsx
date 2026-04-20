@@ -86,9 +86,15 @@ function fmtPnlCompact(value: number, market: string): string {
   const sym = isKR ? '₩' : '$';
   const sign = value > 0 ? '+' : value < 0 ? '-' : '';
   let num: string;
-  if (abs >= 1_000_000) num = `${(abs / 1_000_000).toFixed(abs >= 10_000_000 ? 0 : 1)}M`;
-  else if (abs >= 1_000) num = `${(abs / 1_000).toFixed(abs >= 10_000 ? 0 : 1)}k`;
-  else num = isKR ? Math.round(abs).toString() : abs.toFixed(0);
+  if (isKR) {
+    num = Math.round(abs).toLocaleString('en-US');
+  } else if (abs >= 1_000_000) {
+    num = `${(abs / 1_000_000).toFixed(abs >= 10_000_000 ? 0 : 1)}M`;
+  } else if (abs >= 1_000) {
+    num = `${(abs / 1_000).toFixed(abs >= 10_000 ? 0 : 1)}k`;
+  } else {
+    num = abs.toFixed(0);
+  }
   return `${sign}${sym}${num}`;
 }
 
