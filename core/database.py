@@ -117,7 +117,12 @@ CREATE TABLE IF NOT EXISTS positions (
     opened_at TEXT NOT NULL,
     closed_at TEXT,
     close_reason TEXT,
-    realized_pnl REAL
+    realized_pnl REAL,
+
+    -- Force-exit flags: set when stop-loss rejected by market-close; cleared on next-session forced exit
+    force_exit_flag TEXT,
+    force_exit_reason TEXT,
+    force_exit_set_at TEXT
 );
 
 -- 동일 종목 동시 OPEN 방지 (CLOSED는 복수 허용)
@@ -352,6 +357,51 @@ class Database:
         )
         await self.conn.commit()
 
+    # ── Force-exit helpers ───────────────────────────────────
+
+    async def set_force_exit_flag(
+        self,
+        ticker: str,
+        flag: str,
+        reason: str | None = None,
+    ) -> None:
+        """Mark an OPEN position for forced market-order exit at next session open.
+
+        Args:
+            ticker: Position ticker.
+            flag: Short flag code (e.g., "MARKET_CLOSED", "STOP_DEFERRED_NEAR_CLOSE").
+            reason: Human-readable reason (optional).
+        """
+        from datetime import datetime, timezone
+        now_iso = datetime.now(timezone.utc).isoformat()
+        await self.conn.execute(
+            """
+            UPDATE positions
+            SET force_exit_flag = ?, force_exit_reason = ?, force_exit_set_at = ?
+            WHERE ticker = ? AND status = 'OPEN'
+            """,
+            (flag, reason, now_iso, ticker),
+        )
+        await self.conn.commit()
+        logger.warning(
+            "position_force_exit_flag_set",
+            ticker=ticker,
+            flag=flag,
+            reason=reason,
+        )
+
+    async def clear_force_exit_flag(self, ticker: str) -> None:
+        """Clear force-exit flag after successful exit or manual intervention."""
+        await self.conn.execute(
+            """
+            UPDATE positions
+            SET force_exit_flag = NULL, force_exit_reason = NULL, force_exit_set_at = NULL
+            WHERE ticker = ? AND status = 'OPEN'
+            """,
+            (ticker,),
+        )
+        await self.conn.commit()
+
     # ── Schema info ──────────────────────────────────────────
 
     async def get_schema_version(self) -> int:
@@ -577,6 +627,19 @@ class Database:
                 await self.conn.execute(f"ALTER TABLE daily_log ADD COLUMN {col} {col_type}")
                 await self.conn.commit()
                 logger.info("migration_applied", migration=f"add_daily_log_{col}")
+
+        # Migration: positions force_exit flags (next-session forced market-order exit)
+        pos_cols_cursor = await self.conn.execute("PRAGMA table_info(positions)")
+        pos_cols = {row[1] for row in await pos_cols_cursor.fetchall()}
+        for col, col_type in [
+            ("force_exit_flag", "TEXT"),
+            ("force_exit_reason", "TEXT"),
+            ("force_exit_set_at", "TEXT"),
+        ]:
+            if col not in pos_cols:
+                await self.conn.execute(f"ALTER TABLE positions ADD COLUMN {col} {col_type}")
+                await self.conn.commit()
+                logger.info("migration_applied", migration=f"add_positions_{col}")
 
         # Migration: IBD Market Direction tables
         cursor = await self.conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='ibd_market_direction'")

@@ -376,8 +376,13 @@ class KISRestClient:
         side: str,
         quantity: int,
         price: float,
+        *,
+        ord_dvsn: str = "00",
     ) -> dict[str, Any]:
-        """한국 국내주식 주문 (현금매수/매도)."""
+        """한국 국내주식 주문 (현금매수/매도).
+
+        ord_dvsn: "00"=지정가, "01"=시장가 (시장가 시 price 무시)
+        """
         # TR_ID 선택
         if side == "BUY":
             tr_map = {"live": "TTTC0802U", "paper": "VTTC0802U"}
@@ -386,14 +391,17 @@ class KISRestClient:
 
         tr_id = self._get_tr_id(tr_map)
 
-        # 가격을 틱 단위로 조정
-        adjusted_price = int(adjust_price_to_tick(price, KR_TICK_SIZE_TABLE))
+        # 가격을 틱 단위로 조정 (시장가는 0 전달)
+        if ord_dvsn == "01":
+            adjusted_price = 0
+        else:
+            adjusted_price = int(adjust_price_to_tick(price, KR_TICK_SIZE_TABLE))
 
         body = {
             "CANO": self._settings.account_number,
             "ACNT_PRDT_CD": self._settings.account_product_code,
             "PDNO": ticker,
-            "ORD_DVSN": "00",  # 00=지정가
+            "ORD_DVSN": ord_dvsn,
             "ORD_QTY": str(quantity),
             "ORD_UNPR": str(adjusted_price),
         }
@@ -715,23 +723,25 @@ class KISRestClient:
         price: float,
         *,
         market: str = "US",
+        ord_dvsn: str = "00",
     ) -> dict[str, Any]:
         """
-        지정가 주문.
+        주문 제출 (기본: 지정가).
 
         Args:
             ticker: 종목 코드
             exchange: 거래소 코드
             side: "BUY" 또는 "SELL"
             quantity: 수량
-            price: 지정가
+            price: 지정가 (ord_dvsn="01"이면 무시 — 0 전달 권장)
             market: 시장 구분 ("US" 또는 "KR")
+            ord_dvsn: 주문 구분 ("00"=지정가, "01"=시장가 — KR만 지원)
 
         Returns:
             주문 응답 (ODNO: 주문번호 포함)
         """
         if market == "KR":
-            return await self._kr_place_order(ticker, exchange, side, quantity, price)
+            return await self._kr_place_order(ticker, exchange, side, quantity, price, ord_dvsn=ord_dvsn)
 
         tr_map = TR_ORDER_BUY if side == "BUY" else TR_ORDER_SELL
         tr_id = self._get_tr_id(tr_map)

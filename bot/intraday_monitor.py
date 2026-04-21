@@ -368,6 +368,27 @@ class IntradayMonitor:
     # Execution: Stop-Loss
     # ────────────────────────────────────────────────────────
 
+    def _is_close_imminent(self, buffer_minutes: int = 5) -> bool:
+        """장 마감이 buffer_minutes 이내인지 확인.
+
+        장 마감 직전(또는 이후)엔 주문이 거부될 가능성이 높으므로,
+        stop-loss 주문 submit 대신 force_exit 플래그를 세워 다음 세션으로 연기한다.
+        """
+        mkt_cfg = get_market_config(self._market)
+        if self._market == "KR":
+            now_local = datetime.now(ZoneInfo("Asia/Seoul"))
+        else:
+            now_local = datetime.now(ZoneInfo("America/New_York"))
+            # US config는 KST 기준이므로 ET로 환산
+            # market_close_hour=6 (KST) → 16:00 ET (DST) / 17:00 ET (STD)
+            # 간단히 ET 기준 16:00 - buffer 로 체크
+            close_minutes = 16 * 60
+            now_minutes = now_local.hour * 60 + now_local.minute
+            return now_minutes >= (close_minutes - buffer_minutes)
+        close_minutes = mkt_cfg.market_close_hour * 60 + mkt_cfg.market_close_minute
+        now_minutes = now_local.hour * 60 + now_local.minute
+        return now_minutes >= (close_minutes - buffer_minutes)
+
     async def _execute_stop_loss(
         self,
         ticker: str,
@@ -385,6 +406,22 @@ class IntradayMonitor:
         """
         if await self._db.has_submitted_order(ticker, "SELL", "STOP_LOSS"):
             logger.debug("stop_loss_skipped_pending_order", ticker=ticker)
+            return
+
+        # Layer 1: 장 마감 임박 시 주문 submit 대신 force_exit 플래그로 다음 세션 강제 청산
+        if self._is_close_imminent():
+            await self._db.set_force_exit_flag(
+                ticker=ticker,
+                flag="MARKET_CLOSED",
+                reason=f"stop triggered near close (price={price}, stop={getattr(position, 'current_stop_price', 0)})",
+            )
+            logger.warning(
+                "stop_loss_deferred_near_close",
+                ticker=ticker,
+                price=price,
+                market=self._market,
+                msg="장 마감 임박 → 주문 skip, 다음 세션 강제 청산 예약",
+            )
             return
 
         logger.warning(
@@ -896,6 +933,67 @@ class IntradayMonitor:
             shares=position.total_shares,  # type: ignore[attr-defined]
         )
         await self._event_bus.emit(signal)
+
+    # ────────────────────────────────────────────────────────
+    # Execution: Forced Market-Order Exit (next-session recovery)
+    # ────────────────────────────────────────────────────────
+
+    async def execute_forced_exit_market(self, position: object) -> None:
+        """force_exit_flag가 세팅된 포지션을 시장가(또는 공격적 지정가)로 강제 청산.
+
+        pre_market 직후 호출. 전 세션 마감 임박/이후 손절 거부 건 회수용.
+        """
+        ticker = position.ticker  # type: ignore[attr-defined]
+        if await self._db.has_submitted_order(ticker, "SELL"):
+            logger.debug("forced_exit_skipped_pending_order", ticker=ticker)
+            return
+
+        exchange = await self._resolve_exchange(ticker)
+        # 현재가 조회 — 실패 시 avg_entry_price로 fallback
+        current_price: float = 0.0
+        try:
+            price_data = await self._rest.get_current_price(ticker, exchange, market=self._market)
+            if self._market == "KR":
+                current_price = float(price_data.get("stck_prpr", 0)) or float(position.avg_entry_price)  # type: ignore[attr-defined]
+            else:
+                current_price = float(price_data.get("last", 0)) or float(position.avg_entry_price)  # type: ignore[attr-defined]
+        except Exception as exc:
+            logger.warning("forced_exit_price_fetch_failed", ticker=ticker, error=str(exc))
+            current_price = float(position.avg_entry_price)  # type: ignore[attr-defined]
+
+        logger.warning(
+            "forced_exit_market_executing",
+            ticker=ticker,
+            flag=getattr(position, "force_exit_flag", None),
+            reason=getattr(position, "force_exit_reason", None),
+            current_price=current_price,
+            shares=position.total_shares,  # type: ignore[attr-defined]
+            market=self._market,
+        )
+
+        order = await self._order_executor.execute_exit_sell(
+            ticker=ticker,
+            exchange=exchange,
+            current_price=current_price,
+            shares=position.total_shares,  # type: ignore[attr-defined]
+            order_type=OrderType.EXIT,
+            notes=f"force_exit:{getattr(position, 'force_exit_flag', '')}:{getattr(position, 'force_exit_reason', '')}",
+            market=self._market,
+            aggressive=True,
+        )
+        self.invalidate_balance_cache()
+
+        # 주문이 SUBMITTED 된 경우에만 플래그 제거 (체결은 fill_check 루프가 확인)
+        if order.status.value == "SUBMITTED":
+            await self._db.clear_force_exit_flag(ticker)
+            logger.info("forced_exit_submitted_flag_cleared", ticker=ticker)
+        else:
+            logger.error(
+                "forced_exit_failed",
+                ticker=ticker,
+                status=order.status.value,
+                notes=order.notes,
+            )
 
     # ────────────────────────────────────────────────────────
     # Helpers

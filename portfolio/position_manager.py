@@ -597,7 +597,8 @@ class PositionManager:
             current_stop_price, n_at_entry,
             sector, industry,
             opened_at, closed_at, close_reason, realized_pnl,
-            market
+            market,
+            force_exit_flag, force_exit_reason, force_exit_set_at
         """
         return Position(
             id=row[0],
@@ -616,6 +617,9 @@ class PositionManager:
             close_reason=CloseReason(row[13]) if row[13] else None,
             realized_pnl=row[14],
             market=row[15] if len(row) > 15 else "US",
+            force_exit_flag=row[16] if len(row) > 16 else None,
+            force_exit_reason=row[17] if len(row) > 17 else None,
+            force_exit_set_at=row[18] if len(row) > 18 else None,
         )
 
     @staticmethod

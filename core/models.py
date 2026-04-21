@@ -189,6 +189,11 @@ class Position:
     # Market
     market: str = "US"
 
+    # Force-exit (next-session market-order exit when stop is rejected after market close)
+    force_exit_flag: Optional[str] = None
+    force_exit_reason: Optional[str] = None
+    force_exit_set_at: Optional[str] = None
+
     # Units within this position
     units: list[Unit] = field(default_factory=list)
 

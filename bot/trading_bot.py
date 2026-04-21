@@ -614,6 +614,9 @@ class TradingBot:
 
             await self._intraday.start()
 
+            # 전 세션 마감 임박/이후 stop 거부된 포지션 강제 시장가 청산
+            await self._execute_forced_exits(self._intraday, "US")
+
             tickers = list(self._intraday.precomputed_signals.keys())
 
             open_positions = await self._position_mgr.get_open_positions()
@@ -827,6 +830,9 @@ class TradingBot:
 
             await self._intraday_kr.start()
 
+            # 전 세션 마감 임박/이후 stop 거부된 포지션 강제 시장가 청산
+            await self._execute_forced_exits(self._intraday_kr, "KR")
+
             # Gap-down 즉시 손절: 전일 종가(pykrx)가 손절가 이하인 포지션
             # REST polling이 잘못된 가격을 반환할 수 있으므로, 실제 종가 기반 판단
             await self._execute_gap_down_stops(self._intraday_kr, "KR")
@@ -863,6 +869,35 @@ class TradingBot:
 
         except Exception as e:
             logger.error("kr_intraday_start_failed", error=str(e), exc_info=True)
+
+    async def _execute_forced_exits(self, monitor: IntradayMonitor, market: str) -> None:
+        """force_exit_flag가 세팅된 포지션을 시장가로 강제 청산.
+
+        전 세션 마감 직전/이후 stop-loss가 거부되어 플래그가 찍힌 포지션을
+        이번 세션 개장 직후 즉시 시장가(또는 공격적 지정가)로 청산한다.
+        """
+        open_positions = await self._position_mgr.get_open_positions()
+        for pos in open_positions:
+            if pos.market != market:
+                continue
+            if not pos.force_exit_flag:
+                continue
+            logger.warning(
+                "forced_exit_queued",
+                ticker=pos.ticker,
+                flag=pos.force_exit_flag,
+                reason=pos.force_exit_reason,
+                market=market,
+            )
+            try:
+                await monitor.execute_forced_exit_market(pos)
+            except Exception as exc:
+                logger.error(
+                    "forced_exit_exception",
+                    ticker=pos.ticker,
+                    error=str(exc),
+                    exc_info=True,
+                )
 
     async def _execute_gap_down_stops(self, monitor: IntradayMonitor, market: str) -> None:
         """Gap-down 포지션 즉시 손절.

@@ -217,6 +217,24 @@ class OrderExecutor:
                         msg="브로커 잔고 없음 → 이전 주문이 이미 체결된 것으로 판단, 포지션 강제 청산 필요",
                     )
                     break
+                # 40580000: 모의투자 장종료 / 실전 장외 주문 거부
+                # → 장 마감 이후 제출. 재시도 무의미. 다음 세션 개장 시 강제 시장가 청산 예약.
+                if e.msg_cd == "40580000" or "장종료" in str(e):
+                    order.status = OrderStatus.FAILED
+                    order.notes = _merge_error_note(order.notes, "MARKET_CLOSED_DEFERRED")
+                    order.updated_at = _now_iso()
+                    await self._db.set_force_exit_flag(
+                        ticker=ticker,
+                        flag="MARKET_CLOSED",
+                        reason=f"stop-loss rejected after close (trigger={current_price})",
+                    )
+                    logger.warning(
+                        "stop_loss_market_closed_deferred",
+                        ticker=ticker,
+                        trigger_price=current_price,
+                        msg="장 마감으로 거부 → 다음 개장 시 강제 시장가 청산 예약",
+                    )
+                    break
                 if attempt < STOP_MAX_RETRIES:
                     await asyncio.sleep(STOP_RETRY_DELAY_SECONDS)
                     # 재시도 시 최신 가격으로 갱신
@@ -250,11 +268,16 @@ class OrderExecutor:
         notes: str | None = None,
         *,
         market: str = "US",
+        aggressive: bool = False,
     ) -> Order:
         """
         Donchian 청산 또는 일반 청산 매도.
         손절과 달리 급박하지 않으므로 버퍼를 작게.
         최대 2회 재시도 (장 마감 직전 API 과부하 대비).
+
+        aggressive=True (강제 청산, force-exit next session):
+          - KR: 시장가 주문 (ORD_DVSN="01") 사용
+          - US: 현재가의 -5% 저가 지정가 (시장가 미지원이므로 슬리피지 허용 공격적 체결)
         """
         order = Order(
             ticker=ticker,
@@ -271,7 +294,13 @@ class OrderExecutor:
 
         max_retries = 2
         for attempt in range(1, max_retries + 1):
-            if market == "KR":
+            if aggressive:
+                if market == "KR":
+                    sell_price = 0  # 시장가
+                else:
+                    # US 시장가 미지원 → -5% 공격적 지정가
+                    sell_price = round(current_price * 0.95, 2)
+            elif market == "KR":
                 sell_price = int(adjust_price_to_tick(
                     current_price * (1 - STOP_SELL_BUFFER_PCT / 2), KR_TICK_SIZE_TABLE
                 ))
@@ -287,6 +316,7 @@ class OrderExecutor:
                     quantity=shares,
                     price=sell_price,
                     market=market,
+                    ord_dvsn="01" if (aggressive and market == "KR") else "00",
                 )
                 order.broker_order_id = result.get("ODNO", "")
                 order.updated_at = _now_iso()
@@ -318,6 +348,22 @@ class OrderExecutor:
                         "exit_no_broker_balance",
                         ticker=ticker,
                         msg="브로커 잔고 없음 → 이전 주문이 이미 체결된 것으로 판단",
+                    )
+                    break
+                # 40580000: 장종료 → 다음 세션 강제 청산 예약
+                if e.msg_cd == "40580000" or "장종료" in str(e):
+                    order.status = OrderStatus.FAILED
+                    order.notes = _merge_error_note(order.notes, "MARKET_CLOSED_DEFERRED")
+                    order.updated_at = _now_iso()
+                    await self._db.set_force_exit_flag(
+                        ticker=ticker,
+                        flag="MARKET_CLOSED",
+                        reason=f"exit rejected after close (trigger={current_price})",
+                    )
+                    logger.warning(
+                        "exit_market_closed_deferred",
+                        ticker=ticker,
+                        msg="장 마감으로 거부 → 다음 개장 시 강제 시장가 청산 예약",
                     )
                     break
                 if attempt < max_retries:
