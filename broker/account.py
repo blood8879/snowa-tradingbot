@@ -75,7 +75,11 @@ class AccountManager:
         cash = 0.0
         try:
             psamount = await self._rest.get_purchasable_amount()
-            cash = float(psamount.get("ord_psbl_frcr_amt", 0))
+            cash = float(
+                psamount.get("ord_psbl_frcr_amt")
+                or psamount.get("frcr_ord_psbl_amt1")
+                or 0
+            )
         except Exception as exc:
             logger.warning("get_purchasable_amount_failed", error=str(exc), exc_info=True)
 
