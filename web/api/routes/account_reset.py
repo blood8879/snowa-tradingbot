@@ -82,6 +82,11 @@ async def reset_account(
         )
 
     settings = get_settings()
+    if not settings.is_paper:
+        raise HTTPException(
+            status_code=403,
+            detail="account reset is disabled in live mode",
+        )
     mode = "paper" if settings.is_paper else "live"
     now = datetime.now(timezone.utc)
     now_str = now.isoformat()

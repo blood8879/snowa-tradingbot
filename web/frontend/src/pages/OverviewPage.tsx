@@ -157,14 +157,16 @@ export function OverviewPage() {
             </svg>
             시장 레짐
           </button>
-          <button
-            type="button"
-            onClick={() => setShowResetModal(true)}
-            disabled={isResetting}
-            className="px-4 py-2 text-sm font-medium text-red-400 bg-red-500/10 border border-red-500/30 rounded-lg hover:bg-red-500/20 hover:text-red-300 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            {isResetting ? '초기화 중...' : '계좌 초기화'}
-          </button>
+          {status?.mode !== 'live' && (
+            <button
+              type="button"
+              onClick={() => setShowResetModal(true)}
+              disabled={isResetting}
+              className="px-4 py-2 text-sm font-medium text-red-400 bg-red-500/10 border border-red-500/30 rounded-lg hover:bg-red-500/20 hover:text-red-300 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {isResetting ? '초기화 중...' : '계좌 초기화'}
+            </button>
+          )}
         </div>
       </div>
 
