@@ -536,6 +536,11 @@ class Database:
             await self.conn.commit()
             logger.info("migration_applied", migration="add_watchlist_exchange_column")
 
+        if "name" not in columns:
+            await self.conn.execute("ALTER TABLE watchlist ADD COLUMN name TEXT")
+            await self.conn.commit()
+            logger.info("migration_applied", migration="add_watchlist_name_column")
+
         # Migration: UNIQUE(ticker, status) → partial unique index (OPEN only)
         # 기존 테이블에 UNIQUE(ticker, status) 제약이 있으면 재생성
         cursor = await self.conn.execute(
