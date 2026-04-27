@@ -158,14 +158,9 @@ async def get_watchlist(
                w.minervini_pass,
                w.sector, w.industry, w.avg_daily_volume, w.market_cap,
                w.status,
-               COALESCE(w.latest_price, dp.close) AS latest_price,
+               w.latest_price,
                f.latest_report_date
         FROM watchlist w
-        LEFT JOIN (
-            SELECT ticker, close,
-                   ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY date DESC) AS rn
-            FROM daily_prices
-        ) dp ON dp.ticker = w.ticker AND dp.rn = 1
         LEFT JOIN (
             SELECT ticker, MAX(report_date) AS latest_report_date
             FROM fundamentals
@@ -201,6 +196,7 @@ async def get_watchlist(
     tickers = [r[0] for r in rows]
     n_values: dict[str, float | None] = {}
     avg_volumes: dict[str, float | None] = {}
+    bars_by_ticker: dict[str, list] = {}
     if tickers:
         placeholders = ",".join("?" * len(tickers))
         bars_cursor = await db.conn.execute(
@@ -218,7 +214,6 @@ async def get_watchlist(
             tickers,
         )
         bars_rows = await bars_cursor.fetchall()
-        bars_by_ticker: dict[str, list] = {}
         for br in bars_rows:
             bars_by_ticker.setdefault(br[0], []).append(br)
         for ticker, bars in bars_by_ticker.items():
@@ -237,6 +232,10 @@ async def get_watchlist(
     for r in rows:
         ticker = r[0]
         latest_price = r[15]
+        if latest_price is None:
+            bars = bars_by_ticker.get(ticker)
+            if bars:
+                latest_price = bars[-1][3]
         n_value = n_values.get(ticker)
         avg_volume_50d = avg_volumes.get(ticker)
 
