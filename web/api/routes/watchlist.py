@@ -197,12 +197,48 @@ async def get_watchlist(
     # KR 종목명 로드
     kr_names = _load_kr_stock_names() if market == "KR" else {}
 
+    # ── Batch fetch last 50 bars for all tickers (single SQL) ──
+    tickers = [r[0] for r in rows]
+    n_values: dict[str, float | None] = {}
+    avg_volumes: dict[str, float | None] = {}
+    if tickers:
+        placeholders = ",".join("?" * len(tickers))
+        bars_cursor = await db.conn.execute(
+            f"""
+            SELECT ticker, high, low, close, volume
+            FROM (
+                SELECT ticker, high, low, close, volume,
+                       ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY date DESC) AS rn
+                FROM daily_prices
+                WHERE ticker IN ({placeholders})
+            )
+            WHERE rn <= 50
+            ORDER BY ticker, rn DESC
+            """,
+            tickers,
+        )
+        bars_rows = await bars_cursor.fetchall()
+        bars_by_ticker: dict[str, list] = {}
+        for br in bars_rows:
+            bars_by_ticker.setdefault(br[0], []).append(br)
+        for ticker, bars in bars_by_ticker.items():
+            if len(bars) >= 21:
+                highs = [b[1] for b in bars]
+                lows = [b[2] for b in bars]
+                closes = [b[3] for b in bars]
+                n = calculate_n_single(highs, lows, closes)
+                n_values[ticker] = round(n, 4) if n is not None else None
+            else:
+                n_values[ticker] = None
+            volumes = [b[4] for b in bars if b[4] is not None]
+            avg_volumes[ticker] = round(sum(volumes) / len(volumes)) if volumes else None
+
     stocks = []
     for r in rows:
         ticker = r[0]
         latest_price = r[15]
-        n_value = await _calc_n_value(db, ticker)
-        avg_volume_50d = await _calc_avg_volume_50d(db, ticker)
+        n_value = n_values.get(ticker)
+        avg_volume_50d = avg_volumes.get(ticker)
 
         # 1유닛 사이징 계산
         unit_shares = None
