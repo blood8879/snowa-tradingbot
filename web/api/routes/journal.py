@@ -105,14 +105,22 @@ async def get_journal(
         resolved_start, resolved_end = resolved_end, resolved_start
 
     month_start = f"{resolved_start}-01"
-    end_year, end_mon = resolved_end.split("-")
-    last_day = calendar.monthrange(int(end_year), int(end_mon))[1]
+    end_year, end_mon = (int(x) for x in resolved_end.split("-"))
+    last_day = calendar.monthrange(end_year, end_mon)[1]
+    # daily_log.date is plain 'YYYY-MM-DD' string — inclusive end works.
     month_end = f"{resolved_end}-{last_day:02d}"
+    if end_mon == 12:
+        next_year, next_mon = end_year + 1, 1
+    else:
+        next_year, next_mon = end_year, end_mon + 1
+    # positions.closed_at is full ISO datetime ('YYYY-MM-DDThh:mm:ss+00:00');
+    # use exclusive upper bound so trades on the last day are still matched.
+    month_end_exclusive = f"{next_year:04d}-{next_mon:02d}-01"
     # Legacy field: keep single-month identifier when range is a single month
     month = resolved_start if resolved_start == resolved_end else f"{resolved_start}~{resolved_end}"
 
     # Closed positions in this month
-    journal_params: list = [month_start, month_end]
+    journal_params: list = [month_start, month_end_exclusive]
     journal_market_clause = ""
     if market and market != "ALL":
         journal_market_clause = "AND market = ?"
@@ -125,7 +133,7 @@ async def get_journal(
                total_shares, total_cost
         FROM positions
         WHERE status = 'CLOSED'
-          AND closed_at BETWEEN ? AND ?
+          AND closed_at >= ? AND closed_at < ?
           {journal_market_clause}
         ORDER BY closed_at ASC
         """,
