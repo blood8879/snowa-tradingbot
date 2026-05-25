@@ -762,9 +762,6 @@ class TradingBot:
 
     async def _run_daily_screening_kr(self) -> None:
         """한국 CANSLIM 스크리닝 — KST 07:00."""
-        if not await self.is_market_enabled("KR"):
-            logger.info("kr_daily_screening_skipped_disabled")
-            return
         logger.info("kr_daily_screening_start")
 
         try:
