@@ -80,6 +80,9 @@ class AccountManager:
                 or psamount.get("frcr_ord_psbl_amt1")
                 or 0
             )
+            # 매도 후 결제 대기 중인 외화(`sll_ruse_psbl_amt`)도 자산에 포함.
+            # 이를 누락하면 매도 직후 D+2/D+3 정산 전까지 equity가 매도대금만큼 빠져 보임.
+            cash += float(psamount.get("sll_ruse_psbl_amt") or 0)
         except Exception as exc:
             logger.warning("get_purchasable_amount_failed", error=str(exc), exc_info=True)
 
