@@ -8,6 +8,7 @@ import {
   ResponsiveContainer,
 } from 'recharts';
 import { usePnl } from '@/hooks/usePnl';
+import { usePositions } from '@/hooks/usePositions';
 import { useMarket } from '@/hooks/useMarket';
 import { LoadingSpinner } from '@/components/ui/LoadingSpinner';
 import type { PnlDataPoint } from '@/types/api';
@@ -172,7 +173,33 @@ export function PnlPage() {
   const [calMonth, setCalMonth] = useState(now.getMonth() + 1);
 
   const { data, error, isLoading } = usePnl('daily', market);
+  const { data: positionsData } = usePositions(market);
   const points = data?.data ?? [];
+
+  const holdingsPnl = useMemo(() => {
+    if (!positionsData) return null;
+    let pnlSum = 0;
+    let costSum = 0;
+    let evalSum = 0;
+    let count = 0;
+    for (const p of positionsData.positions) {
+      if (p.unrealized_pnl !== null && p.unrealized_pnl !== undefined) {
+        pnlSum += p.unrealized_pnl;
+        evalSum += p.eval_amount ?? 0;
+        costSum += p.total_cost ?? 0;
+        count += 1;
+      }
+    }
+    for (const bp of positionsData.broker_positions) {
+      pnlSum += bp.pnl_amount;
+      evalSum += bp.eval_amount;
+      costSum += bp.avg_price * bp.quantity;
+      count += 1;
+    }
+    if (count === 0) return null;
+    const pct = costSum > 0 ? (pnlSum / costSum) * 100 : 0;
+    return { pnl: pnlSum, pct, evalSum, costSum, count };
+  }, [positionsData]);
 
   const dayMap = useMemo(() => buildDayPnlMap(points, calYear, calMonth), [points, calYear, calMonth]);
   const monthMap = useMemo(() => buildMonthPnlMap(points, calYear), [points, calYear]);
@@ -236,6 +263,28 @@ export function PnlPage() {
           </button>
         ))}
       </div>
+
+      {/* ─── 현재 보유 평가손익 ─── */}
+      {holdingsPnl && (
+        <div className="mb-6 bg-panel rounded-xl p-4 border border-slate-700/50">
+          <div className="flex items-baseline justify-between flex-wrap gap-2">
+            <div>
+              <h3 className="text-sm font-semibold text-slate-300">현재 보유 평가손익</h3>
+              <p className="text-[11px] text-slate-500 mt-0.5">
+                보유 {holdingsPnl.count}종목 · 매입가 대비 미실현 손익
+              </p>
+            </div>
+            <div className="text-right">
+              <p className={`text-xl sm:text-2xl font-bold tabular-nums ${holdingsPnl.pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                {fmtPnl(holdingsPnl.pnl, market)}
+              </p>
+              <p className={`text-xs tabular-nums ${holdingsPnl.pnl >= 0 ? 'text-emerald-400/80' : 'text-red-400/80'}`}>
+                {holdingsPnl.pnl >= 0 ? '+' : ''}{holdingsPnl.pct.toFixed(2)}%
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ─── Daily View ─── */}
       {periodMode === 'daily' && viewMode === 'calendar' && (
