@@ -525,22 +525,20 @@ class IntradayMonitor:
         total_position_value = sum(p.total_cost for p in open_positions if p.market == self._market)
         account_equity = cash + total_position_value
 
-        # 리스크 체크
-        sizing = calculate_unit_shares(
-            account_equity=account_equity,
-            entry_price=price,
-            n_value=signals.n_value,
-            market=self._market,
+        # 터틀 원칙: 모든 unit은 1차 진입 시 결정된 동일 shares를 사용한다.
+        # 매번 재사이징하면 equity·가격·regime_scale 변동에 따라 unit별 수량이 달라진다.
+        first_unit_shares = (
+            position.units[0].shares  # type: ignore[attr-defined]
+            if getattr(position, "units", None)
+            else 0
         )
-        if sizing["skip"]:
-            logger.info(
-                "pyramid_skipped_sizing",
+        if first_unit_shares < 1:
+            logger.warning(
+                "pyramid_skipped_no_first_unit_shares",
                 ticker=ticker,
-                reason=sizing.get("reason", "insufficient capital"),
             )
             return
-
-        shares = sizing["shares"]
+        shares = first_unit_shares
 
         # 현금 부족 사전 체크 — API 호출 낭비 방지
         required_cash = shares * price * 1.01  # 1% 버퍼
