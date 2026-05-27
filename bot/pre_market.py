@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 import structlog
 
@@ -287,6 +288,34 @@ class PreMarketPreparer:
         )
         return signals
 
+    def _exclude_incomplete_current_bar(self, bars: list, market: str, ticker: str) -> list:
+        """Remove the current market day's unfinished daily bar before signal math."""
+        if not bars:
+            return bars
+
+        if market == "US":
+            now_local = datetime.now(ZoneInfo("America/New_York"))
+            close_minutes = 16 * 60
+        else:
+            now_local = datetime.now(ZoneInfo("Asia/Seoul"))
+            mkt_cfg = get_market_config("KR")
+            close_minutes = mkt_cfg.market_close_hour * 60 + mkt_cfg.market_close_minute
+
+        latest_date = getattr(bars[-1], "date", None)
+        current_date = now_local.date().isoformat()
+        now_minutes = now_local.hour * 60 + now_local.minute
+
+        if latest_date == current_date and now_minutes <= close_minutes:
+            logger.info(
+                "pre_market_excluding_incomplete_bar",
+                ticker=ticker,
+                market=market,
+                date=latest_date,
+            )
+            return bars[:-1]
+
+        return bars
+
     async def _compute_ticker_signal(
         self,
         ticker: str,
@@ -304,6 +333,7 @@ class PreMarketPreparer:
             ``PrecomputedSignals`` 인스턴스, 데이터 부족 시 ``None``.
         """
         bars = await self._price_cache.get_ohlcv(ticker, LOOKBACK_DATA_DAYS)
+        bars = self._exclude_incomplete_current_bar(bars, market, ticker)
 
         if len(bars) < 56:
             # 최소 55일(S2 entry) + 1일(ATR prev_close) 필요

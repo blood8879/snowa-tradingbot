@@ -104,6 +104,7 @@ class IntradayMonitor:
         # 주기적 상태 로그용 카운터
         self._tick_count: int = 0
         self._last_status_log_time: float = 0.0
+        self._last_market_closed_log_time: float = 0.0
         self._last_prices: dict[str, float] = {}
 
         # 피라미딩/진입/손절 실패 시 쿨다운 (ticker → monotonic time)
@@ -160,11 +161,12 @@ class IntradayMonitor:
                 logger.info("balance_cache_refreshed", cash=cash, source="purchasable_amount", market=self._market)
                 return cash
             else:
-                # US market: ord_psbl_frcr_amt / frcr_ord_psbl_amt1
+                # US market: include reusable sell proceeds while preserving cash fallback.
                 psamount = await self._rest.get_purchasable_amount(market=self._market)
                 cash = float(psamount.get("ord_psbl_frcr_amt", 0))
                 if cash <= 0:
                     cash = float(psamount.get("frcr_ord_psbl_amt1", 0))
+                cash += float(psamount.get("sll_ruse_psbl_amt") or 0)
                 # US: API 성공 시 값을 신뢰 (0이어도 유효 — 전액 투자 중일 수 있음)
                 self._cached_cash = cash
                 self._balance_cache_time = now
@@ -228,6 +230,23 @@ class IntradayMonitor:
         except Exception:
             pass
 
+    def _is_regular_market_open(self) -> bool:
+        """Return True only during the market's regular trading session."""
+        if self._market == "KR":
+            now_local = datetime.now(ZoneInfo("Asia/Seoul"))
+            open_minutes = 9 * 60
+            close_minutes = 15 * 60 + 30
+        else:
+            now_local = datetime.now(ZoneInfo("America/New_York"))
+            open_minutes = 9 * 60 + 30
+            close_minutes = 16 * 60
+
+        if now_local.weekday() > 4:
+            return False
+
+        now_minutes = now_local.hour * 60 + now_local.minute
+        return open_minutes <= now_minutes < close_minutes
+
     async def start(self) -> None:
         self._load_stock_names()
         self._running = True
@@ -281,6 +300,12 @@ class IntradayMonitor:
                 latest_prices=dict(sorted(self._last_prices.items())[:5]),
                 signals_count=len(self.precomputed_signals),
             )
+
+        if not self._is_regular_market_open():
+            if now_mono - self._last_market_closed_log_time >= self._STATUS_LOG_INTERVAL:
+                self._last_market_closed_log_time = now_mono
+                logger.info("intraday_trading_skipped_market_closed", market=self._market)
+            return
 
         # 사전 계산 데이터 & 포지션 조회
         signals = self.precomputed_signals.get(ticker)
@@ -708,7 +733,14 @@ class IntradayMonitor:
                 "entry_skipped_sizing",
                 ticker=ticker,
                 reason=sizing.get("reason", "insufficient capital"),
+                price=round(price, 4),
+                n_value=round(signals.n_value, 4),
+                cash=round(cash, 2),
+                account_equity=round(account_equity, 2),
+                effective_equity=round(effective_equity, 2),
+                regime_scale=self.market_regime_scale,
             )
+            self._entry_cooldown[ticker] = time.monotonic()
             return
 
         shares = sizing["shares"]
