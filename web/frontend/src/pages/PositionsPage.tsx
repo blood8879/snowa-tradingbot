@@ -1,5 +1,6 @@
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { PageHeader } from '@/components/ui/PageHeader';
+import { StockReportModal } from '@/components/reports/StockReportModal';
 import { DataTable } from '@/components/ui/DataTable';
 import { Badge } from '@/components/ui/Badge';
 import { PnlText } from '@/components/ui/PnlText';
@@ -27,7 +28,7 @@ function formatDate(iso: string): string {
   return `${d.getFullYear()}-${(d.getMonth() + 1).toString().padStart(2, '0')}-${d.getDate().toString().padStart(2, '0')}`;
 }
 
-function getPositionColumns(market: string): Column<Position>[] {
+function getPositionColumns(market: string, onReport: (position: Position) => void): Column<Position>[] {
   return [
     {
       key: 'ticker',
@@ -39,6 +40,22 @@ function getPositionColumns(market: string): Column<Position>[] {
             <span className="ml-1.5 text-xs font-normal text-slate-400">{row.name}</span>
           )}
         </span>
+      ),
+    },
+    {
+      key: 'report',
+      header: '리포트',
+      render: (row) => (
+        <button
+          type="button"
+          onClick={(event) => {
+            event.stopPropagation();
+            onReport(row);
+          }}
+          className="rounded-md border border-slate-600 px-2 py-1 text-xs text-slate-200 hover:border-emerald-500 hover:text-emerald-300"
+        >
+          보기
+        </button>
       ),
     },
     {
@@ -300,8 +317,9 @@ function getBrokerColumns(market: string): Column<BrokerPosition>[] {
 export function PositionsPage() {
   const { market } = useMarket();
   const { data, isLoading, error } = usePositions(market);
+  const [selectedReport, setSelectedReport] = useState<Position | null>(null);
 
-  const positionCols = useMemo(() => getPositionColumns(market), [market]);
+  const positionCols = useMemo(() => getPositionColumns(market, setSelectedReport), [market]);
   const brokerCols = useMemo(() => getBrokerColumns(market), [market]);
 
   if (isLoading) {
@@ -335,6 +353,15 @@ export function PositionsPage() {
             : "보유 중인 포지션이 없습니다"}
         />
       </div>
+
+      {selectedReport && (
+        <StockReportModal
+          ticker={selectedReport.ticker}
+          name={selectedReport.name}
+          market={market}
+          onClose={() => setSelectedReport(null)}
+        />
+      )}
 
       {brokerPositions.length > 0 && (
         <>

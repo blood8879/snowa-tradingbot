@@ -1,5 +1,6 @@
 import { useState, useMemo, useCallback } from 'react';
 import { PageHeader } from '@/components/ui/PageHeader';
+import { StockReportModal } from '@/components/reports/StockReportModal';
 import { StatCard } from '@/components/ui/StatCard';
 import { DataTable } from '@/components/ui/DataTable';
 import { Badge } from '@/components/ui/Badge';
@@ -39,7 +40,11 @@ function getPctColorClass(value: number | null): string {
   return 'text-slate-300';
 }
 
-function getColumns(realtimeData: RealtimePricesResponse | undefined, market: string): Column<WatchlistStock>[] {
+function getColumns(
+  realtimeData: RealtimePricesResponse | undefined,
+  market: string,
+  onReport: (stock: WatchlistStock) => void,
+): Column<WatchlistStock>[] {
   return [
     {
       key: 'ticker',
@@ -155,6 +160,22 @@ function getColumns(realtimeData: RealtimePricesResponse | undefined, market: st
         <Badge variant={row.minervini_pass ? 'success' : 'danger'}>
           {row.minervini_pass ? 'PASS' : 'FAIL'}
         </Badge>
+      ),
+    },
+    {
+      key: 'report',
+      header: '리포트',
+      render: (row) => (
+        <button
+          type="button"
+          onClick={(event) => {
+            event.stopPropagation();
+            onReport(row);
+          }}
+          className="rounded-md border border-slate-600 px-2 py-1 text-xs text-slate-200 hover:border-emerald-500 hover:text-emerald-300"
+        >
+          보기
+        </button>
       ),
     },
     {
@@ -376,6 +397,7 @@ export function WatchlistPage() {
   const { market } = useMarket();
   const { data, isLoading, error } = useWatchlist(market);
   const [sortState, setSortState] = useState<SortState | null>(null);
+  const [selectedReport, setSelectedReport] = useState<WatchlistStock | null>(null);
   const watchlistTickers = useMemo(() => (data?.watchlist ?? []).map((s) => s.ticker), [data]);
   const { data: realtimeData } = useRealtimePrices(watchlistTickers);
 
@@ -414,7 +436,10 @@ export function WatchlistPage() {
     return (sum / valid.length).toFixed(1);
   }, [watchlist]);
 
-  const columns = useMemo(() => getColumns(realtimeData, market), [realtimeData, market]);
+  const columns = useMemo(
+    () => getColumns(realtimeData, market, setSelectedReport),
+    [realtimeData, market],
+  );
 
   if (isLoading) {
     return <LoadingSpinner />;
@@ -455,6 +480,15 @@ export function WatchlistPage() {
 
       {/* History Section */}
       <HistorySection market={market} />
+
+      {selectedReport && (
+        <StockReportModal
+          ticker={selectedReport.ticker}
+          name={selectedReport.name}
+          market={market}
+          onClose={() => setSelectedReport(null)}
+        />
+      )}
     </div>
   );
 }
