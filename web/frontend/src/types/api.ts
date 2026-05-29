@@ -142,6 +142,61 @@ export interface WatchlistHistoryResponse {
   market: string;
 }
 
+// ── GET /api/stock-reports/{ticker} ──────────────
+
+export interface StockReportBreakdownItem {
+  score: number;
+  comment: string;
+}
+
+export interface StockReportJson {
+  verdict: 'PASS' | 'WATCH' | 'FAIL';
+  canslim_fit_score: number;
+  minervini_fit_score: number;
+  overall_fit_score: number;
+  confidence: number;
+  summary: string;
+  oneil_thesis: string;
+  minervini_thesis: string;
+  watchlist_reason: string;
+  risk_note: string;
+  strengths: string[];
+  weaknesses: string[];
+  red_flags: string[];
+  canslim_breakdown: Record<string, StockReportBreakdownItem>;
+  minervini_breakdown: {
+    trend_template_pass: boolean;
+    score: number;
+    comment: string;
+  };
+}
+
+export interface StockReportRecord {
+  id: number;
+  provider: string;
+  model: string;
+  report_json: StockReportJson;
+  summary_markdown: string;
+  verdict: 'PASS' | 'WATCH' | 'FAIL';
+  canslim_fit_score: number;
+  minervini_fit_score: number;
+  overall_fit_score: number;
+  confidence: number;
+  generated_at: string;
+  updated_at: string;
+}
+
+export interface StockReportResponse {
+  ticker: string;
+  market: string;
+  eligible: boolean;
+  report_period: string;
+  financial_data_hash: string;
+  has_financial_data: boolean;
+  report: StockReportRecord | null;
+  cache_hit?: boolean;
+}
+
 // ── GET /api/trades ──────────────────────────────
 
 export interface Trade {
