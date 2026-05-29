@@ -54,6 +54,13 @@ class Settings(BaseSettings):
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
 
+    # ── AI Stock Reports ─────────────────────────────────────
+    ai_report_provider: str = "openai"  # openai, anthropic, or disabled
+    ai_report_model: str = "gpt-4.1-mini"
+    ai_report_prompt_version: str = "canslim_ko_v1"
+    openai_api_key: str = ""
+    anthropic_api_key: str = ""
+
     # ── Database ─────────────────────────────────────────────
     db_path: str = "data/snowa.db"
 

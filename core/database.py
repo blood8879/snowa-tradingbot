@@ -265,6 +265,35 @@ CREATE TABLE IF NOT EXISTS watchlist_history (
 CREATE INDEX IF NOT EXISTS idx_watchlist_history_market_date ON watchlist_history(market, recorded_at DESC);
 
 -- ===================================================================
+-- 12. AI stock reports (financial-data keyed LLM reports)
+-- ===================================================================
+CREATE TABLE IF NOT EXISTS ai_stock_reports (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ticker TEXT NOT NULL,
+    market TEXT NOT NULL DEFAULT 'US',
+    report_period TEXT NOT NULL,
+    report_type TEXT NOT NULL,
+    prompt_version TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    model TEXT NOT NULL,
+    financial_data_hash TEXT NOT NULL,
+    input_snapshot TEXT NOT NULL,
+    report_json TEXT NOT NULL,
+    summary_markdown TEXT NOT NULL,
+    verdict TEXT,
+    canslim_fit_score REAL,
+    minervini_fit_score REAL,
+    overall_fit_score REAL,
+    confidence REAL,
+    generated_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(ticker, market, report_period, report_type, prompt_version, financial_data_hash)
+);
+
+CREATE INDEX IF NOT EXISTS idx_ai_stock_reports_lookup
+    ON ai_stock_reports(ticker, market, report_period, report_type, prompt_version, financial_data_hash);
+
+-- ===================================================================
 -- Schema version tracking
 -- ===================================================================
 CREATE TABLE IF NOT EXISTS schema_version (
