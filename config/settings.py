@@ -68,6 +68,7 @@ class Settings(BaseSettings):
 
     # ── Screening Data Refresh ───────────────────────────────
     screening_max_stale_fundamental_targets: int = 500
+    screening_max_kr_dart_prefetch_targets: int = 150
 
     # ── Database ─────────────────────────────────────────────
     db_path: str = "data/snowa.db"

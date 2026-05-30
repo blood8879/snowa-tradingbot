@@ -19,6 +19,7 @@ from pathlib import Path
 
 import structlog
 
+from config.settings import get_settings
 from core.database import Database
 from data.universe import UniverseManager
 from data.universe_kr import KRUniverseManager
@@ -144,6 +145,19 @@ class WatchlistManager:
                 for t in existing_tickers:
                     if t not in dart_candidate_set and t in set(tickers):
                         dart_candidates.append(t)
+
+                max_dart_prefetch = get_settings().screening_max_kr_dart_prefetch_targets
+                if max_dart_prefetch < 0:
+                    max_dart_prefetch = 0
+
+                if len(dart_candidates) > max_dart_prefetch:
+                    logger.warning(
+                        "dart_prefetch_candidates_capped",
+                        original=len(dart_candidates),
+                        capped=max_dart_prefetch,
+                        market=market,
+                    )
+                    dart_candidates = dart_candidates[:max_dart_prefetch]
 
                 logger.info(
                     "dart_prefetch_start",
