@@ -91,22 +91,47 @@ class AIUsageStatusService:
         )
 
     async def _get_openai_status(self, checked_at: str) -> AIUsageStatus:
-        api_key = self._settings.openai_admin_api_key or self._settings.openai_api_key
-        if not api_key:
+        if not self._settings.openai_api_key:
             return AIUsageStatus(
                 provider="openai",
                 model=self._settings.ai_report_model,
                 configured=False,
-                usage_supported=True,
+                usage_supported=False,
                 available=False,
                 status="missing_key",
-                message="OPENAI_API_KEY 또는 OPENAI_ADMIN_API_KEY가 설정되어 있지 않습니다.",
+                message="OPENAI_API_KEY가 설정되어 있지 않습니다.",
+                checked_at=checked_at,
+            )
+
+        api_key = self._settings.openai_admin_api_key
+        if not api_key:
+            return AIUsageStatus(
+                provider="openai",
+                model=self._settings.ai_report_model,
+                configured=True,
+                usage_supported=False,
+                available=True,
+                status="usage_unavailable",
+                message="OPENAI_ADMIN_API_KEY가 없어 비용 조회는 비활성화되어 있습니다.",
                 checked_at=checked_at,
             )
 
         budget = self._settings.ai_report_monthly_budget_usd
         min_remaining = self._settings.ai_report_min_remaining_usd
-        cost = await self._fetch_openai_month_cost(api_key)
+        try:
+            cost = await self._fetch_openai_month_cost(api_key)
+        except Exception as exc:
+            return AIUsageStatus(
+                provider="openai",
+                model=self._settings.ai_report_model,
+                configured=True,
+                usage_supported=False,
+                available=True,
+                status="usage_unavailable",
+                message=f"OpenAI 비용 조회를 사용할 수 없습니다: {exc}",
+                checked_at=checked_at,
+            )
+
         remaining = (budget - cost) if budget > 0 else None
 
         if budget > 0 and remaining is not None and remaining < min_remaining:
