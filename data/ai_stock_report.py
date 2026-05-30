@@ -212,6 +212,7 @@ class StockReportService:
         else:
             report_period = "NO_FINANCIAL_DATA"
         financial_payload = {"quarterly": quarterly, "annual": annual}
+        derived_financial_analysis = self._build_derived_financial_analysis(financial_payload)
         financial_data_hash = hashlib.sha256(
             json.dumps(financial_payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
         ).hexdigest()
@@ -239,11 +240,91 @@ class StockReportService:
             "financial_data_hash": financial_data_hash,
             "has_financial_data": bool(quarterly or annual),
             "financial_payload": financial_payload,
+            "derived_financial_analysis": derived_financial_analysis,
             "watchlist_metrics": watchlist_metrics,
             "company_profile": None,
             "consensus_payload": self._empty_consensus_payload(market),
             "prompt_version": self._settings.ai_report_prompt_version,
             "report_type": REPORT_TYPE,
+        }
+
+    def _build_derived_financial_analysis(self, financial_payload: dict[str, Any]) -> dict[str, Any]:
+        quarterly = financial_payload.get("quarterly") or []
+        annual = financial_payload.get("annual") or []
+        latest = quarterly[0] if quarterly else None
+        previous_quarter = quarterly[1] if len(quarterly) > 1 else None
+        yoy_quarter = self._find_prior_year_quarter(latest, quarterly) if latest else None
+        return {
+            "latest_quarter": latest,
+            "prior_year_comparable_quarter": yoy_quarter,
+            "previous_quarter": previous_quarter,
+            "latest_quarter_growth": {
+                "yoy": self._growth_block(latest, yoy_quarter),
+                "qoq": self._growth_block(latest, previous_quarter),
+            },
+            "annual_eps_trend": [
+                {"period": row.get("period"), "eps": row.get("eps")}
+                for row in annual
+                if row.get("eps") is not None
+            ],
+            "annual_revenue_trend": [
+                {"period": row.get("period"), "revenue": row.get("revenue")}
+                for row in annual
+                if row.get("revenue") is not None
+            ],
+        }
+
+    @staticmethod
+    def _find_prior_year_quarter(
+        latest: dict[str, Any] | None,
+        quarterly: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        if not latest:
+            return None
+        period = str(latest.get("period") or "")
+        if "Q" not in period:
+            return None
+        year_text, quarter_text = period.split("Q", 1)
+        try:
+            prior_period = f"{int(year_text) - 1}Q{quarter_text}"
+        except ValueError:
+            return None
+        return next((row for row in quarterly if row.get("period") == prior_period), None)
+
+    def _growth_block(
+        self,
+        current: dict[str, Any] | None,
+        base: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        return {
+            "base_period": base.get("period") if base else None,
+            "revenue": self._growth_value(current, base, "revenue"),
+            "eps": self._growth_value(current, base, "eps"),
+            "net_income": self._growth_value(current, base, "net_income"),
+        }
+
+    @staticmethod
+    def _growth_value(
+        current: dict[str, Any] | None,
+        base: dict[str, Any] | None,
+        key: str,
+    ) -> dict[str, Any]:
+        current_value = current.get(key) if current else None
+        base_value = base.get(key) if base else None
+        if current_value is None or base_value in (None, 0):
+            return {
+                "current": current_value,
+                "base": base_value,
+                "pct": None,
+                "text": "비교 데이터 없음",
+            }
+        pct = (float(current_value) / float(base_value) - 1.0) * 100.0
+        direction = "증가" if pct >= 0 else "감소"
+        return {
+            "current": current_value,
+            "base": base_value,
+            "pct": pct,
+            "text": f"{abs(pct):.1f}% {direction}",
         }
 
     async def _enrich_report_context(self, context: dict[str, Any]) -> dict[str, Any]:
@@ -442,6 +523,7 @@ class StockReportService:
         input_snapshot = json.dumps(
             {
                 "financial_payload": context["financial_payload"],
+                "derived_financial_analysis": context["derived_financial_analysis"],
                 "watchlist_metrics": context["watchlist_metrics"],
                 "company_profile": context.get("company_profile"),
                 "consensus_payload": context.get("consensus_payload"),
@@ -735,6 +817,7 @@ class StockReportService:
             "company_profile_source": context.get("company_profile"),
             "consensus_source": context.get("consensus_payload"),
             "financials": context["financial_payload"],
+            "precomputed_financial_analysis": context["derived_financial_analysis"],
             "screening_metrics_for_context_only": context["watchlist_metrics"],
         }
         return f"""
@@ -754,6 +837,9 @@ Report requirements:
 - Start from what the company does. Use company_profile_source when available. If it is unavailable, say the company description source is unavailable and infer only from company_name/sector/industry if provided.
 - Always summarize the latest-quarter reported financial results in latest_quarter_report_summary.
 - In latest_quarter_report_summary, calculate and explain revenue, EPS, and net income changes versus the prior-year comparable quarter when available and versus the immediately previous quarter when available.
+- Use precomputed_financial_analysis.latest_quarter_growth for YoY/QoQ percentages. Do not recalculate those percentages or choose a different comparison quarter.
+- For YoY, use precomputed_financial_analysis.prior_year_comparable_quarter as the comparison period. If it is missing, write "비교 데이터 없음".
+- For QoQ, use precomputed_financial_analysis.previous_quarter as the comparison period. If it is missing, write "비교 데이터 없음".
 - Always summarize consensus in consensus_summary. If consensus_source.available is false, set available=false and clearly write that consensus data is unavailable; never fabricate estimates.
 - advisory_buy_opinion is a reference-only human-readable opinion. It must never be used as the automated trade gate.
 
