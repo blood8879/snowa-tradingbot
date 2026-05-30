@@ -60,6 +60,7 @@ class Settings(BaseSettings):
     ai_report_prompt_version: str = "canslim_ko_v1"
     ai_report_auto_generate: bool = True
     ai_report_trade_gate_enabled: bool = True
+    ai_report_filter_watchlist_to_pass: bool = True
     ai_report_monthly_budget_usd: float = 0.0
     ai_report_min_remaining_usd: float = 0.0
     openai_api_key: str = ""

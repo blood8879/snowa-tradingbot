@@ -292,14 +292,31 @@ class DailyScreeningPipeline:
             # Cached by latest financial period/hash, so removed/re-added names
             # do not incur another API call unless financial data changed.
             llm_start = time.monotonic()
+            settings = get_settings()
             llm_summary = await self._generate_ai_reports(entries, market=market)
             result.update(llm_summary)
+            if settings.ai_report_filter_watchlist_to_pass:
+                ai_filter_summary = await self._filter_watchlist_to_ai_pass(
+                    entries,
+                    pass_tickers=llm_summary["ai_report_pass_tickers"],
+                    verdicts=llm_summary["ai_report_verdicts"],
+                    market=market,
+                )
+                result.update(ai_filter_summary)
+                result["watchlist_count_before_ai_filter"] = result["watchlist_count"]
+                result["watchlist_count"] = ai_filter_summary["ai_report_pass_count"]
             logger.info(
                 "daily_screening_ai_reports_complete",
                 generated=llm_summary["ai_reports_generated"],
                 cache_hits=llm_summary["ai_report_cache_hits"],
                 skipped=llm_summary["ai_reports_skipped"],
                 failed=llm_summary["ai_reports_failed"],
+                pass_count=llm_summary["ai_report_pass_count"],
+                filtered=(
+                    result.get("ai_report_watchlist_removed", 0)
+                    if settings.ai_report_filter_watchlist_to_pass
+                    else 0
+                ),
                 elapsed=f"{time.monotonic() - llm_start:.1f}s",
                 market=market,
             )
@@ -331,6 +348,9 @@ class DailyScreeningPipeline:
             "ai_report_cache_hits": 0,
             "ai_reports_skipped": 0,
             "ai_reports_failed": 0,
+            "ai_report_pass_count": 0,
+            "ai_report_pass_tickers": [],
+            "ai_report_verdicts": {},
         }
         if not settings.ai_report_auto_generate:
             summary["ai_reports_skipped"] = len(entries)
@@ -384,4 +404,98 @@ class DailyScreeningPipeline:
             else:
                 summary["ai_reports_generated"] += 1
 
+            report = report_result.get("report") or {}
+            verdict = report.get("verdict")
+            if verdict:
+                summary["ai_report_verdicts"][ticker] = verdict
+            if verdict == "PASS":
+                summary["ai_report_pass_tickers"].append(ticker)
+                summary["ai_report_pass_count"] += 1
+
         return summary
+
+    async def _filter_watchlist_to_ai_pass(
+        self,
+        entries: list[dict],
+        *,
+        pass_tickers: list[str],
+        verdicts: dict[str, str],
+        market: str,
+    ) -> dict:
+        """Keep only LLM PASS verdicts in the active watchlist."""
+        if not entries:
+            return {
+                "ai_report_watchlist_removed": 0,
+                "ai_report_pass_count": 0,
+            }
+
+        conn = self._db.conn
+        now = time.strftime("%Y-%m-%dT%H:%M:%S")
+        entry_tickers = {entry["ticker"] for entry in entries}
+        pass_set = set(pass_tickers)
+        remove_tickers = sorted(entry_tickers - pass_set)
+
+        if not remove_tickers:
+            return {
+                "ai_report_watchlist_removed": 0,
+                "ai_report_pass_count": len(pass_set),
+            }
+
+        placeholders = ",".join("?" for _ in remove_tickers)
+        await conn.execute(
+            f"""
+            UPDATE watchlist
+            SET status = 'REMOVED'
+            WHERE status = 'ACTIVE'
+              AND market = ?
+              AND ticker IN ({placeholders})
+            """,
+            (market, *remove_tickers),
+        )
+
+        rows_cursor = await conn.execute(
+            f"""
+            SELECT ticker, name, quarterly_eps_growth, annual_eps_cagr,
+                   rs_rating, custom_composite_score, minervini_pass
+            FROM watchlist
+            WHERE market = ? AND ticker IN ({placeholders})
+            """,
+            (market, *remove_tickers),
+        )
+        rows = await rows_cursor.fetchall()
+
+        for row in rows:
+            ticker = row[0]
+            verdict = verdicts.get(ticker, "NO_CURRENT_PASS_REPORT")
+            reason = f"LLM 리포트 PASS 미충족({verdict})"
+            await conn.execute(
+                """INSERT INTO watchlist_history
+                   (ticker, name, market, action, reason, quarterly_eps_growth, annual_eps_cagr,
+                    rs_rating, composite_score, minervini_pass, recorded_at)
+                   VALUES (?, ?, ?, 'REMOVED', ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    ticker,
+                    row[1],
+                    market,
+                    reason,
+                    row[2],
+                    row[3],
+                    row[4],
+                    row[5],
+                    row[6],
+                    now,
+                ),
+            )
+
+        await conn.commit()
+        logger.info(
+            "daily_screening_ai_watchlist_filtered",
+            market=market,
+            pass_count=len(pass_set),
+            removed=len(remove_tickers),
+            removed_sample=remove_tickers[:10],
+        )
+        return {
+            "ai_report_watchlist_removed": len(remove_tickers),
+            "ai_report_pass_count": len(pass_set),
+        }
