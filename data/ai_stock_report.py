@@ -547,6 +547,7 @@ Do not invent facts, news, products, guidance, institutional activity, or chart 
 If a field is missing, mark it as unknown and reduce confidence.
 All narrative comments must be written in Korean.
 Return strict JSON only. No markdown outside JSON.
+Every string field in the returned JSON must be non-empty. If evidence is limited, write a short Korean explanation instead of an empty string.
 
 Important cache rule: this report is based on financial data only. Screening metrics are provided only as context; do not claim they are refreshed by this report.
 
@@ -557,6 +558,10 @@ Evaluation principles:
 - WATCH means the company is promising but has a core growth-quality problem that should block automated trading for now.
 - FAIL means the provided data contradicts CANSLIM/Minervini suitability.
 - Prioritize current-quarter EPS growth, annual EPS growth, revenue growth when available, RS rating, composite score, and Minervini pass.
+- CANSLIM PASS requires sustained growth from a positive earnings base. A loss-to-profit turnaround is not enough for PASS.
+- Treat prior-year loss to current-year profit, recent annual loss, or EPS growth caused mainly by moving from negative to positive as WATCH unless there are multiple consecutive profitable years and recent quarters confirm durable growth.
+- Prefer companies with at least 3 consecutive profitable annual EPS records and positive year-over-year quarterly EPS growth from a positive prior-year comparable period.
+- If the most recent annual EPS is positive but the immediately preceding annual EPS was negative, classify as WATCH for turnaround confirmation, not PASS.
 - Missing non-core fields such as institutional ownership, product/news narrative, sector context, or detailed market leadership should lower confidence, but must not by itself block PASS.
 - Missing revenue should not by itself block PASS when EPS growth, RS rating, and Minervini/composite context are strong. This is especially important for KR names where revenue fields can be unavailable in the stored DART data.
 - Market regime YELLOW or an unknown market regime should be mentioned as a risk, but must not by itself block PASS.
@@ -564,7 +569,8 @@ Evaluation principles:
 - Red flags should be explicit, but do not list mere absence of institutional/product/sector data as a red flag unless it is the primary available evidence.
 
 Verdict policy:
-- Choose PASS when the candidate has strong current/annual EPS growth and no clear core financial contradiction, especially if rs_rating >= 80, minervini_pass is true, or custom_composite_score is strong.
+- Choose PASS only when the candidate has at least 3 consecutive profitable annual EPS records, strong current/annual EPS growth, and no clear core financial contradiction, especially if rs_rating >= 80, minervini_pass is true, or custom_composite_score is strong.
+- Do not choose PASS for pure turnarounds. Require evidence of sustained positive earnings growth, not merely recovery from losses.
 - Choose WATCH when growth exists but the core evidence is mixed, unstable, very incomplete, or materially risky.
 - Choose FAIL when core earnings/revenue evidence is weak or contradicts growth-stock suitability.
 
