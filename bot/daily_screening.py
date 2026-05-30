@@ -221,16 +221,19 @@ class DailyScreeningPipeline:
                     except Exception:
                         pass
 
-                # Cap stale targets to prevent multi-hour fetch on first run
-                MAX_STALE_TARGETS = 500
-                if len(stale_targets) > MAX_STALE_TARGETS:
+                # Cap stale targets to prevent multi-hour fetch on first run.
+                max_stale_targets = get_settings().screening_max_stale_fundamental_targets
+                if max_stale_targets < 0:
+                    max_stale_targets = 0
+
+                if len(stale_targets) > max_stale_targets:
                     logger.warning(
                         "daily_screening_stale_targets_capped",
                         original=len(stale_targets),
-                        capped=MAX_STALE_TARGETS,
+                        capped=max_stale_targets,
                         market=market,
                     )
-                    stale_targets = stale_targets[:MAX_STALE_TARGETS]
+                    stale_targets = stale_targets[:max_stale_targets]
 
                 result["stale_targets"] = len(stale_targets)
                 logger.info(

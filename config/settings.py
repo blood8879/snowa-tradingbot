@@ -66,6 +66,9 @@ class Settings(BaseSettings):
     openai_admin_api_key: str = ""
     anthropic_api_key: str = ""
 
+    # ── Screening Data Refresh ───────────────────────────────
+    screening_max_stale_fundamental_targets: int = 500
+
     # ── Database ─────────────────────────────────────────────
     db_path: str = "data/snowa.db"
 
