@@ -29,7 +29,10 @@ from config.constants import (
     YFINANCE_BATCH_DELAY,
     YFINANCE_BATCH_SIZE,
 )
+from config.settings import get_settings
 from core.database import Database
+from data.ai_stock_report import StockReportError, StockReportService
+from data.ai_usage_status import AIUsageStatusService
 from data.earnings_calendar import EarningsCalendar
 from data.fundamental_data import FundamentalDataManager
 from data.price_cache import PriceCache
@@ -282,6 +285,22 @@ class DailyScreeningPipeline:
                 market=market,
             )
 
+            # ── Step 6: LLM report pre-generation ─────────────
+            # Cached by latest financial period/hash, so removed/re-added names
+            # do not incur another API call unless financial data changed.
+            llm_start = time.monotonic()
+            llm_summary = await self._generate_ai_reports(entries, market=market)
+            result.update(llm_summary)
+            logger.info(
+                "daily_screening_ai_reports_complete",
+                generated=llm_summary["ai_reports_generated"],
+                cache_hits=llm_summary["ai_report_cache_hits"],
+                skipped=llm_summary["ai_reports_skipped"],
+                failed=llm_summary["ai_reports_failed"],
+                elapsed=f"{time.monotonic() - llm_start:.1f}s",
+                market=market,
+            )
+
         except Exception:
             logger.exception("daily_screening_pipeline_error", market=market)
             raise
@@ -301,3 +320,65 @@ class DailyScreeningPipeline:
         )
 
         return result
+
+    async def _generate_ai_reports(self, entries: list[dict], *, market: str) -> dict:
+        settings = get_settings()
+        summary = {
+            "ai_reports_generated": 0,
+            "ai_report_cache_hits": 0,
+            "ai_reports_skipped": 0,
+            "ai_reports_failed": 0,
+        }
+        if not settings.ai_report_auto_generate:
+            summary["ai_reports_skipped"] = len(entries)
+            return summary
+
+        try:
+            usage_status = await AIUsageStatusService(settings).get_status()
+        except Exception as exc:
+            summary["ai_reports_skipped"] = len(entries)
+            logger.warning(
+                "daily_screening_ai_reports_skipped_usage_status_failed",
+                error=str(exc),
+                market=market,
+            )
+            return summary
+        if not usage_status.available:
+            summary["ai_reports_skipped"] = len(entries)
+            logger.warning(
+                "daily_screening_ai_reports_skipped_provider_unavailable",
+                status=usage_status.status,
+                message=usage_status.message,
+                market=market,
+            )
+            return summary
+
+        service = StockReportService(self._db, settings)
+        for entry in entries:
+            ticker = entry["ticker"]
+            try:
+                report_result = await service.generate_report(ticker, market)
+            except StockReportError as exc:
+                summary["ai_reports_failed"] += 1
+                logger.warning(
+                    "daily_screening_ai_report_failed",
+                    ticker=ticker,
+                    market=market,
+                    error=str(exc),
+                )
+                continue
+            except Exception:
+                summary["ai_reports_failed"] += 1
+                logger.exception(
+                    "daily_screening_ai_report_unexpected_error",
+                    ticker=ticker,
+                    market=market,
+                )
+                continue
+
+            if report_result.get("cache_hit"):
+                summary["ai_report_cache_hits"] += 1
+            else:
+                summary["ai_reports_generated"] += 1
+
+        return summary

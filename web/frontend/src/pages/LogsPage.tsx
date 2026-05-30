@@ -3,10 +3,11 @@ import { PageHeader } from '@/components/ui/PageHeader';
 import { StatCard } from '@/components/ui/StatCard';
 import { Badge } from '@/components/ui/Badge';
 import { LoadingSpinner } from '@/components/ui/LoadingSpinner';
+import { useAIReportStatus } from '@/hooks/useAIReportStatus';
 import { useBotHealth } from '@/hooks/useBotHealth';
 import { useLogs } from '@/hooks/useLogs';
 import type { BadgeVariant } from '@/components/ui/Badge';
-import type { BotHealthResponse, LogEntry } from '@/types/api';
+import type { AIReportStatusResponse, BotHealthResponse, LogEntry } from '@/types/api';
 
 type LogLevel = 'ALL' | 'ERROR' | 'WARNING' | 'INFO';
 
@@ -44,12 +45,24 @@ function formatDetailValue(value: string | null): string {
   return value;
 }
 
+function formatUsd(value: number | null | undefined): string {
+  if (value == null) return '-';
+  return `$${value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
+function getAIStatusVariant(status: AIReportStatusResponse | undefined): BadgeVariant {
+  if (!status?.available) return 'danger';
+  if (status.status === 'ok') return 'success';
+  return 'sell';
+}
+
 export function LogsPage() {
   const [selectedLevel, setSelectedLevel] = useState<LogLevel>('ALL');
   const { data: health, isLoading: healthLoading, error: healthError } = useBotHealth();
+  const { data: aiStatus, isLoading: aiStatusLoading } = useAIReportStatus();
   const { data: logsData, isLoading: logsLoading, error: logsError } = useLogs(100, selectedLevel);
 
-  if (healthLoading || logsLoading) {
+  if (healthLoading || logsLoading || aiStatusLoading) {
     return <LoadingSpinner />;
   }
 
@@ -122,6 +135,37 @@ export function LogsPage() {
             <span className="text-sm text-slate-100">
               {health?.latest_screening_date ? formatTimestamp(health.latest_screening_date) : '-'}
             </span>
+          </div>
+        </div>
+      </div>
+
+      <div className="bg-panel rounded-xl p-4 border border-slate-700/50">
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="text-sm font-medium text-slate-400">LLM 매매 게이트</h3>
+          <Badge variant={getAIStatusVariant(aiStatus)}>
+            {aiStatus?.available ? 'READY' : 'BLOCKED'}
+          </Badge>
+        </div>
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-x-8 gap-y-3">
+          <div className="flex justify-between">
+            <span className="text-sm text-slate-400">Provider</span>
+            <span className="text-sm text-slate-100">{aiStatus?.provider ?? '-'}</span>
+          </div>
+          <div className="flex justify-between">
+            <span className="text-sm text-slate-400">Model</span>
+            <span className="text-sm text-slate-100">{aiStatus?.model ?? '-'}</span>
+          </div>
+          <div className="flex justify-between">
+            <span className="text-sm text-slate-400">이번 달 비용</span>
+            <span className="text-sm text-slate-100">{formatUsd(aiStatus?.current_month_cost_usd)}</span>
+          </div>
+          <div className="flex justify-between">
+            <span className="text-sm text-slate-400">예산 잔여</span>
+            <span className="text-sm text-slate-100">{formatUsd(aiStatus?.remaining_budget_usd)}</span>
+          </div>
+          <div className="sm:col-span-2 lg:col-span-4 flex justify-between gap-4">
+            <span className="text-sm text-slate-400">상태</span>
+            <span className="text-right text-sm text-slate-100">{aiStatus?.message ?? '-'}</span>
           </div>
         </div>
       </div>

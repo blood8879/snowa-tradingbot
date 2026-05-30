@@ -41,6 +41,7 @@ export const API = {
   marketStatus: '/api/market/status',
   marketToggle: (marketId: string) => `/api/market/${marketId}/toggle`,
   accountReset: '/api/account/reset',
+  aiReportStatus: '/api/ai-reports/status',
   stockReport: (ticker: string, market = 'US') => `/api/stock-reports/${ticker}?market=${market}`,
   generateStockReport: (ticker: string, market = 'US') =>
     `/api/stock-reports/${ticker}/generate?market=${market}`,

@@ -197,6 +197,21 @@ export interface StockReportResponse {
   cache_hit?: boolean;
 }
 
+export interface AIReportStatusResponse {
+  provider: string;
+  model: string;
+  configured: boolean;
+  usage_supported: boolean;
+  available: boolean;
+  status: string;
+  message: string;
+  current_month_cost_usd: number | null;
+  monthly_budget_usd: number | null;
+  remaining_budget_usd: number | null;
+  min_remaining_usd: number | null;
+  checked_at: string | null;
+}
+
 // ── GET /api/trades ──────────────────────────────
 
 export interface Trade {

@@ -20,6 +20,7 @@ import structlog
 
 from broker.kis_rest import KISRestClient
 from broker.order_executor import OrderExecutor
+from config.settings import get_settings
 from config.market_config import get_market_config
 from core.database import Database
 from core.events import EventBus
@@ -45,6 +46,7 @@ from bot.journal_context import (
     build_pyramid_context,
     build_stop_loss_context,
 )
+from data.ai_stock_report import StockReportService
 
 logger = structlog.get_logger(__name__)
 
@@ -693,6 +695,10 @@ class IntradayMonitor:
             logger.debug("entry_skipped_pending_order", ticker=ticker)
             return
 
+        if not await self._ai_report_gate_allows_entry(ticker):
+            self._entry_cooldown[ticker] = time.monotonic()
+            return
+
         # 안전장치: 같은 종목에 오늘 FAILED 진입 주문이 3개 이상이면 차단
         # (fill check 실패로 반복 주문하는 루프 방지)
         if ticker in self._entry_blocked_today:
@@ -866,6 +872,27 @@ class IntradayMonitor:
             n_value=signals.n_value,
         )
         await self._event_bus.emit(signal)
+
+    async def _ai_report_gate_allows_entry(self, ticker: str) -> bool:
+        settings = get_settings()
+        if not settings.ai_report_trade_gate_enabled:
+            return True
+
+        service = StockReportService(self._db, settings)
+        gate = await service.get_trade_gate_status(ticker, self._market)
+        if gate["allowed"]:
+            return True
+
+        logger.info(
+            "entry_blocked_ai_report_gate",
+            ticker=ticker,
+            name=self._name(ticker),
+            market=self._market,
+            reason=gate["reason"],
+            report_period=gate.get("report_period"),
+            msg="AI 리포트 PASS가 아니므로 신규 진입 차단",
+        )
+        return False
 
     # ────────────────────────────────────────────────────────
     # Execution: Donchian Exit

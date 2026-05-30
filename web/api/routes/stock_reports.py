@@ -7,11 +7,28 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from config.settings import get_settings
 from core.database import Database
 from data.ai_stock_report import StockReportError, StockReportService
+from data.ai_usage_status import CachedAIUsageStatusService
 from web.api.dependencies import get_db, verify_api_key
 
 logger = structlog.get_logger(__name__)
 
 router = APIRouter(tags=["stock-reports"])
+
+_usage_status_service: CachedAIUsageStatusService | None = None
+
+
+def _get_usage_status_service() -> CachedAIUsageStatusService:
+    global _usage_status_service
+    if _usage_status_service is None:
+        _usage_status_service = CachedAIUsageStatusService(get_settings())
+    return _usage_status_service
+
+
+@router.get("/ai-reports/status", dependencies=[Depends(verify_api_key)])
+async def get_ai_report_status() -> dict:
+    """Return LLM report provider and configured budget status."""
+    status = await _get_usage_status_service().get_status()
+    return status.to_dict()
 
 
 @router.get("/stock-reports/{ticker}", dependencies=[Depends(verify_api_key)])

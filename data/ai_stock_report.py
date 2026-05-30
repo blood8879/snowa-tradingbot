@@ -97,6 +97,45 @@ class StockReportService:
             "cache_hit": False,
         }
 
+    async def get_trade_gate_status(self, ticker: str, market: str) -> dict[str, Any]:
+        """Return whether the latest financial-data report allows trading.
+
+        This method is intentionally read-only. Intraday trading should not
+        create a fresh LLM request on the signal path; screening is responsible
+        for pre-generating reports.
+        """
+        ticker = ticker.upper()
+        financial_context = await self._build_financial_context(ticker, market)
+        if not financial_context["has_financial_data"]:
+            return {
+                "allowed": False,
+                "reason": "NO_FINANCIAL_DATA",
+                "report": None,
+                "report_period": financial_context["report_period"],
+            }
+
+        cached = await self._load_cached_report(
+            ticker=ticker,
+            market=market,
+            report_period=financial_context["report_period"],
+            financial_data_hash=financial_context["financial_data_hash"],
+        )
+        if cached is None:
+            return {
+                "allowed": False,
+                "reason": "NO_CURRENT_REPORT",
+                "report": None,
+                "report_period": financial_context["report_period"],
+            }
+
+        verdict = cached.get("verdict")
+        return {
+            "allowed": verdict == "PASS",
+            "reason": "PASS" if verdict == "PASS" else f"VERDICT_{verdict or 'UNKNOWN'}",
+            "report": cached,
+            "report_period": financial_context["report_period"],
+        }
+
     async def _is_eligible(self, ticker: str, market: str) -> bool:
         cursor = await self._db.conn.execute(
             """

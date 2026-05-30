@@ -1,7 +1,6 @@
-import { useState } from 'react';
 import { Badge } from '@/components/ui/Badge';
 import { LoadingSpinner } from '@/components/ui/LoadingSpinner';
-import { generateStockReport, useStockReport } from '@/hooks/useStockReport';
+import { useStockReport } from '@/hooks/useStockReport';
 import type { StockReportJson } from '@/types/api';
 
 interface StockReportModalProps {
@@ -123,24 +122,9 @@ function ReportBody({ report }: { report: StockReportJson }) {
 }
 
 export function StockReportModal({ ticker, name, market, onClose }: StockReportModalProps) {
-  const { data, isLoading, error, mutate } = useStockReport(ticker, market);
-  const [generating, setGenerating] = useState(false);
-  const [generateError, setGenerateError] = useState<string | null>(null);
+  const { data, isLoading, error } = useStockReport(ticker, market);
 
   const report = data?.report?.report_json ?? null;
-
-  const handleGenerate = async () => {
-    setGenerating(true);
-    setGenerateError(null);
-    try {
-      await generateStockReport(ticker, market);
-      await mutate();
-    } catch (err) {
-      setGenerateError(err instanceof Error ? err.message : '리포트 생성에 실패했습니다.');
-    } finally {
-      setGenerating(false);
-    }
-  };
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-4 backdrop-blur-sm" onClick={onClose}>
@@ -173,20 +157,11 @@ export function StockReportModal({ ticker, name, market, onClose }: StockReportM
           )}
           {!isLoading && !error && data?.eligible && data.has_financial_data && !report && (
             <div className="rounded-xl border border-slate-700 bg-slate-900/40 p-5 text-center">
-              <p className="text-sm text-slate-300">아직 저장된 AI 리포트가 없습니다.</p>
-              <p className="mt-2 text-xs text-slate-500">같은 재무 데이터 hash의 리포트가 생성되면 이후에는 API를 다시 호출하지 않습니다.</p>
-              <button
-                type="button"
-                disabled={generating}
-                onClick={() => void handleGenerate()}
-                className="mt-4 rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-60"
-              >
-                {generating ? '생성 중...' : '한글 리포트 생성'}
-              </button>
+              <p className="text-sm text-slate-300">아직 최신 재무 기준 AI 리포트가 없습니다.</p>
+              <p className="mt-2 text-xs text-slate-500">리포트는 스크리닝 파이프라인에서 자동 생성되며, 같은 재무 데이터 hash는 재사용됩니다.</p>
             </div>
           )}
           {report && <ReportBody report={report} />}
-          {generateError && <p className="mt-4 text-sm text-red-400">{generateError}</p>}
         </div>
       </div>
     </div>

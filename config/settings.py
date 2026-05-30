@@ -58,7 +58,12 @@ class Settings(BaseSettings):
     ai_report_provider: str = "openai"  # openai, anthropic, or disabled
     ai_report_model: str = "gpt-4.1-mini"
     ai_report_prompt_version: str = "canslim_ko_v1"
+    ai_report_auto_generate: bool = True
+    ai_report_trade_gate_enabled: bool = True
+    ai_report_monthly_budget_usd: float = 0.0
+    ai_report_min_remaining_usd: float = 0.0
     openai_api_key: str = ""
+    openai_admin_api_key: str = ""
     anthropic_api_key: str = ""
 
     # ── Database ─────────────────────────────────────────────
