@@ -134,11 +134,12 @@ export function StockReportModal({ ticker, name, market, onClose }: StockReportM
       >
         <div className="sticky top-0 z-10 flex items-center justify-between border-b border-slate-800 bg-slate-950/95 px-5 py-4 backdrop-blur">
           <div>
+            <p className="text-xs font-medium uppercase text-emerald-400">최신 분기 AI 재무 리포트</p>
             <h2 className="text-lg font-semibold text-slate-100">
               {ticker} {name && <span className="text-sm font-normal text-slate-400">{name}</span>}
             </h2>
             <p className="mt-1 text-xs text-slate-500">
-              재무 기준: {data?.report_period ?? '—'} · 모델: {data?.report?.model ?? '—'} · 생성: {formatDate(data?.report?.updated_at)}
+              최신 재무 기준: {data?.report_period ?? '—'} · 모델: {data?.report?.model ?? '—'} · 생성: {formatDate(data?.report?.updated_at)}
             </p>
           </div>
           <button type="button" onClick={onClose} className="rounded-lg px-3 py-1.5 text-sm text-slate-400 hover:bg-slate-800 hover:text-slate-100">

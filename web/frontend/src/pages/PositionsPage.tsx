@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react';
+import { FileText } from 'lucide-react';
 import { PageHeader } from '@/components/ui/PageHeader';
 import { StockReportModal } from '@/components/reports/StockReportModal';
 import { DataTable } from '@/components/ui/DataTable';
@@ -44,16 +45,18 @@ function getPositionColumns(market: string, onReport: (position: Position) => vo
     },
     {
       key: 'report',
-      header: '리포트',
+      header: '최신분기 리포트',
       render: (row) => (
         <button
           type="button"
+          title="최신 분기 AI 재무 리포트 보기"
           onClick={(event) => {
             event.stopPropagation();
             onReport(row);
           }}
-          className="rounded-md border border-slate-600 px-2 py-1 text-xs text-slate-200 hover:border-emerald-500 hover:text-emerald-300"
+          className="inline-flex items-center gap-1.5 rounded-md border border-slate-600 px-2 py-1 text-xs text-slate-200 hover:border-emerald-500 hover:text-emerald-300"
         >
+          <FileText size={14} aria-hidden="true" />
           보기
         </button>
       ),
