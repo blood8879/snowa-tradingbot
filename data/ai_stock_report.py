@@ -460,8 +460,16 @@ class StockReportService:
             parsed = json.loads(cleaned)
         except json.JSONDecodeError as exc:
             raise StockReportError("LLM 응답이 JSON 형식이 아닙니다.") from exc
+        self._normalize_report_json(parsed)
         self._validate_report_json(parsed)
         return parsed
+
+    def _normalize_report_json(self, parsed: dict[str, Any]) -> None:
+        """Fill harmless empty narrative fields before strict validation."""
+        fallback = str(parsed.get("summary") or "제공된 재무 데이터 기준으로 판단 근거가 제한적입니다.").strip()
+        for key in ["summary", "oneil_thesis", "minervini_thesis", "watchlist_reason", "risk_note"]:
+            if not isinstance(parsed.get(key), str) or not parsed[key].strip():
+                parsed[key] = fallback
 
     def _validate_report_json(self, parsed: dict[str, Any]) -> None:
         required_text_fields = ["summary", "oneil_thesis", "minervini_thesis", "watchlist_reason", "risk_note"]
