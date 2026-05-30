@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from datetime import datetime, timezone
 from typing import Any
 
@@ -84,6 +85,7 @@ class StockReportService:
                 "cache_hit": True,
             }
 
+        financial_context = await self._enrich_report_context(financial_context)
         report_json = await self._call_llm(financial_context)
         saved = await self._save_report(financial_context, report_json)
         return {
@@ -238,9 +240,138 @@ class StockReportService:
             "has_financial_data": bool(quarterly or annual),
             "financial_payload": financial_payload,
             "watchlist_metrics": watchlist_metrics,
+            "company_profile": None,
+            "consensus_payload": self._empty_consensus_payload(market),
             "prompt_version": self._settings.ai_report_prompt_version,
             "report_type": REPORT_TYPE,
         }
+
+    async def _enrich_report_context(self, context: dict[str, Any]) -> dict[str, Any]:
+        """Add slower external research fields only when a fresh report is needed."""
+        if context["market"] != "US":
+            context["company_profile"] = {
+                "available": False,
+                "summary": "국내 종목의 사업 설명 데이터 소스가 연결되어 있지 않습니다.",
+                "sector": context["watchlist_metrics"].get("sector"),
+                "industry": context["watchlist_metrics"].get("industry"),
+            }
+            context["consensus_payload"] = self._empty_consensus_payload(context["market"])
+            return context
+
+        try:
+            import asyncio
+
+            loop = asyncio.get_event_loop()
+            enrichment = await loop.run_in_executor(None, self._fetch_yfinance_research, context["ticker"])
+        except Exception:
+            logger.warning("ai_report_research_enrichment_failed", ticker=context["ticker"], exc_info=True)
+            enrichment = {
+                "company_profile": {
+                    "available": False,
+                    "summary": "회사 개요 데이터를 가져오지 못했습니다.",
+                    "sector": context["watchlist_metrics"].get("sector"),
+                    "industry": context["watchlist_metrics"].get("industry"),
+                },
+                "consensus_payload": self._empty_consensus_payload(context["market"]),
+            }
+
+        context["company_profile"] = enrichment["company_profile"]
+        context["consensus_payload"] = enrichment["consensus_payload"]
+        return context
+
+    @staticmethod
+    def _empty_consensus_payload(market: str) -> dict[str, Any]:
+        reason = "컨센서스 데이터 없음" if market == "US" else "국내 종목 컨센서스 데이터 소스가 연결되어 있지 않습니다."
+        return {
+            "available": False,
+            "reason": reason,
+            "info": {},
+            "earnings_estimate": [],
+            "revenue_estimate": [],
+            "eps_trend": [],
+            "eps_revisions": [],
+            "growth_estimates": [],
+            "recommendations_summary": [],
+        }
+
+    @classmethod
+    def _fetch_yfinance_research(cls, ticker: str) -> dict[str, Any]:
+        import yfinance as yf  # noqa: WPS433 — intentionally lazy and generation-only
+
+        ticker_obj = yf.Ticker(ticker)
+        info = ticker_obj.info or {}
+        company_profile = {
+            "available": bool(info.get("longBusinessSummary")),
+            "name": info.get("longName") or info.get("shortName"),
+            "sector": info.get("sector"),
+            "industry": info.get("industry"),
+            "summary": info.get("longBusinessSummary") or "회사 개요 데이터 없음",
+        }
+        consensus_info_keys = [
+            "targetMeanPrice",
+            "targetMedianPrice",
+            "recommendationMean",
+            "recommendationKey",
+            "numberOfAnalystOpinions",
+            "forwardEps",
+            "trailingEps",
+            "revenueGrowth",
+            "earningsGrowth",
+        ]
+        consensus_payload = {
+            "available": False,
+            "reason": "컨센서스 데이터 없음",
+            "info": {key: cls._clean_external_value(info.get(key)) for key in consensus_info_keys},
+            "earnings_estimate": cls._dataframe_records(getattr(ticker_obj, "earnings_estimate", None)),
+            "revenue_estimate": cls._dataframe_records(getattr(ticker_obj, "revenue_estimate", None)),
+            "eps_trend": cls._dataframe_records(getattr(ticker_obj, "eps_trend", None)),
+            "eps_revisions": cls._dataframe_records(getattr(ticker_obj, "eps_revisions", None)),
+            "growth_estimates": cls._dataframe_records(getattr(ticker_obj, "growth_estimates", None)),
+            "recommendations_summary": cls._dataframe_records(getattr(ticker_obj, "recommendations_summary", None)),
+        }
+        consensus_payload["available"] = any(
+            bool(consensus_payload[key])
+            for key in [
+                "earnings_estimate",
+                "revenue_estimate",
+                "eps_trend",
+                "eps_revisions",
+                "growth_estimates",
+                "recommendations_summary",
+            ]
+        )
+        if consensus_payload["available"]:
+            consensus_payload["reason"] = "컨센서스 데이터 제공됨"
+        return {"company_profile": company_profile, "consensus_payload": consensus_payload}
+
+    @classmethod
+    def _dataframe_records(cls, dataframe: Any) -> list[dict[str, Any]]:
+        if dataframe is None or getattr(dataframe, "empty", True):
+            return []
+        records = dataframe.reset_index().to_dict(orient="records")
+        return [cls._clean_external_value(record) for record in records]
+
+    @classmethod
+    def _clean_external_value(cls, value: Any) -> Any:
+        if isinstance(value, dict):
+            return {str(key): cls._clean_external_value(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [cls._clean_external_value(item) for item in value]
+        if hasattr(value, "item"):
+            try:
+                return cls._clean_external_value(value.item())
+            except Exception:
+                pass
+        if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
+            return None
+        if isinstance(value, datetime):
+            return value.isoformat()
+        if hasattr(value, "isoformat"):
+            try:
+                return value.isoformat()
+            except Exception:
+                pass
+        return value
 
     def _financial_row_to_dict(self, row: tuple, period_type: str) -> dict[str, Any]:
         return {
@@ -312,6 +443,8 @@ class StockReportService:
             {
                 "financial_payload": context["financial_payload"],
                 "watchlist_metrics": context["watchlist_metrics"],
+                "company_profile": context.get("company_profile"),
+                "consensus_payload": context.get("consensus_payload"),
             },
             ensure_ascii=False,
             sort_keys=True,
@@ -376,6 +509,15 @@ class StockReportService:
             f"판정: {report_json.get('verdict', 'UNKNOWN')}",
             f"종합점수: {report_json.get('overall_fit_score', 'N/A')}",
             "",
+            "회사 개요:",
+            str(report_json.get("company_profile", "")),
+            "",
+            "최신 분기 결산:",
+            str((report_json.get("latest_quarter_report_summary") or {}).get("summary", "")),
+            "",
+            "컨센서스:",
+            str((report_json.get("consensus_summary") or {}).get("summary", "")),
+            "",
             str(report_json.get("summary", "")),
         ]
         strengths = report_json.get("strengths") or []
@@ -430,7 +572,7 @@ class StockReportService:
         prompt = self._build_prompt(context)
         payload = {
             "model": self._settings.ai_report_model,
-            "max_tokens": 1800,
+            "max_tokens": 3000,
             "temperature": 0.2,
             "system": "Return strict JSON only. All comments must be written in Korean.",
             "messages": [{"role": "user", "content": prompt}],
@@ -467,12 +609,19 @@ class StockReportService:
     def _normalize_report_json(self, parsed: dict[str, Any]) -> None:
         """Fill harmless empty narrative fields before strict validation."""
         fallback = str(parsed.get("summary") or "제공된 재무 데이터 기준으로 판단 근거가 제한적입니다.").strip()
-        for key in ["summary", "oneil_thesis", "minervini_thesis", "watchlist_reason", "risk_note"]:
+        for key in ["summary", "oneil_thesis", "minervini_thesis", "watchlist_reason", "risk_note", "company_profile"]:
             if not isinstance(parsed.get(key), str) or not parsed[key].strip():
                 parsed[key] = fallback
 
     def _validate_report_json(self, parsed: dict[str, Any]) -> None:
-        required_text_fields = ["summary", "oneil_thesis", "minervini_thesis", "watchlist_reason", "risk_note"]
+        required_text_fields = [
+            "company_profile",
+            "summary",
+            "oneil_thesis",
+            "minervini_thesis",
+            "watchlist_reason",
+            "risk_note",
+        ]
         required_score_fields = [
             "canslim_fit_score",
             "minervini_fit_score",
@@ -483,6 +632,9 @@ class StockReportService:
             "verdict",
             *required_score_fields,
             *required_text_fields,
+            "latest_quarter_report_summary",
+            "consensus_summary",
+            "advisory_buy_opinion",
             "strengths",
             "weaknesses",
             "red_flags",
@@ -500,6 +652,9 @@ class StockReportService:
             self._validate_text(parsed[key], key)
         for key in ["strengths", "weaknesses", "red_flags"]:
             self._validate_string_list(parsed[key], key)
+        self._validate_latest_quarter_report_summary(parsed["latest_quarter_report_summary"])
+        self._validate_consensus_summary(parsed["consensus_summary"])
+        self._validate_advisory_buy_opinion(parsed["advisory_buy_opinion"])
         self._validate_canslim_breakdown(parsed["canslim_breakdown"])
         self._validate_minervini_breakdown(parsed["minervini_breakdown"])
 
@@ -516,6 +671,42 @@ class StockReportService:
     def _validate_string_list(self, value: Any, field_name: str) -> None:
         if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
             raise StockReportError(f"LLM 응답 {field_name} 값은 문자열 배열이어야 합니다.")
+
+    def _validate_text_dict(self, value: Any, field_name: str, required_keys: list[str]) -> None:
+        if not isinstance(value, dict):
+            raise StockReportError(f"LLM 응답 {field_name} 값은 객체여야 합니다.")
+        for key in required_keys:
+            self._validate_text(value.get(key), f"{field_name}.{key}")
+
+    def _validate_latest_quarter_report_summary(self, value: Any) -> None:
+        self._validate_text_dict(
+            value,
+            "latest_quarter_report_summary",
+            ["period", "report_date", "summary", "revenue", "eps", "net_income", "recent_quarter_trend"],
+        )
+        self._validate_text_dict(value.get("yoy_growth"), "latest_quarter_report_summary.yoy_growth", ["revenue", "eps", "net_income"])
+        self._validate_text_dict(value.get("qoq_growth"), "latest_quarter_report_summary.qoq_growth", ["revenue", "eps", "net_income"])
+
+    def _validate_consensus_summary(self, value: Any) -> None:
+        if not isinstance(value, dict):
+            raise StockReportError("LLM 응답 consensus_summary 값은 객체여야 합니다.")
+        if not isinstance(value.get("available"), bool):
+            raise StockReportError("LLM 응답 consensus_summary.available 값은 boolean이어야 합니다.")
+        for key in ["summary", "next_quarter", "current_year", "next_year", "estimate_revisions", "analyst_rating"]:
+            self._validate_text(value.get(key), f"consensus_summary.{key}")
+
+    def _validate_advisory_buy_opinion(self, value: Any) -> None:
+        if not isinstance(value, dict):
+            raise StockReportError("LLM 응답 advisory_buy_opinion 값은 객체여야 합니다.")
+        if value.get("opinion") not in {"BUY_CANDIDATE", "WAIT", "NO_BUY"}:
+            raise StockReportError("LLM 응답 advisory_buy_opinion.opinion 값이 올바르지 않습니다.")
+        if not isinstance(value.get("reference_only"), bool):
+            raise StockReportError("LLM 응답 advisory_buy_opinion.reference_only 값은 boolean이어야 합니다.")
+        if not isinstance(value.get("not_included_in_trade_gate"), bool):
+            raise StockReportError("LLM 응답 advisory_buy_opinion.not_included_in_trade_gate 값은 boolean이어야 합니다.")
+        self._validate_score(value.get("confidence"), "advisory_buy_opinion.confidence")
+        self._validate_text(value.get("reason"), "advisory_buy_opinion.reason")
+        self._validate_string_list(value.get("conditions"), "advisory_buy_opinion.conditions")
 
     def _validate_canslim_breakdown(self, value: Any) -> None:
         if not isinstance(value, dict):
@@ -541,6 +732,8 @@ class StockReportService:
             "company_name": context["company_name"],
             "market": context["market"],
             "report_period": context["report_period"],
+            "company_profile_source": context.get("company_profile"),
+            "consensus_source": context.get("consensus_payload"),
             "financials": context["financial_payload"],
             "screening_metrics_for_context_only": context["watchlist_metrics"],
         }
@@ -548,7 +741,7 @@ class StockReportService:
 You are an equity screening analyst specializing in William O'Neil CANSLIM and Mark Minervini SEPA-style growth stock selection.
 
 Your task is NOT to predict stock price.
-Your task is to judge whether the provided company financial data supports inclusion in a CANSLIM/Minervini-style watchlist.
+Your task is to produce a concise Korean financial report and judge whether the provided company data supports inclusion in a CANSLIM/Minervini-style watchlist.
 
 Use ONLY the data provided below.
 Do not invent facts, news, products, guidance, institutional activity, or chart patterns.
@@ -557,7 +750,12 @@ All narrative comments must be written in Korean.
 Return strict JSON only. No markdown outside JSON.
 Every string field in the returned JSON must be non-empty. If evidence is limited, write a short Korean explanation instead of an empty string.
 
-Important cache rule: this report is based on financial data only. Screening metrics are provided only as context; do not claim they are refreshed by this report.
+Report requirements:
+- Start from what the company does. Use company_profile_source when available. If it is unavailable, say the company description source is unavailable and infer only from company_name/sector/industry if provided.
+- Always summarize the latest-quarter reported financial results in latest_quarter_report_summary.
+- In latest_quarter_report_summary, calculate and explain revenue, EPS, and net income changes versus the prior-year comparable quarter when available and versus the immediately previous quarter when available.
+- Always summarize consensus in consensus_summary. If consensus_source.available is false, set available=false and clearly write that consensus data is unavailable; never fabricate estimates.
+- advisory_buy_opinion is a reference-only human-readable opinion. It must never be used as the automated trade gate.
 
 Evaluation principles:
 - The upstream screener has already passed CANSLIM/Minervini numeric filters before this report is generated.
@@ -575,12 +773,22 @@ Evaluation principles:
 - Market regime YELLOW or an unknown market regime should be mentioned as a risk, but must not by itself block PASS.
 - Use WATCH/FAIL for real blocking issues: recent EPS contraction versus the prior-year period, weak or decelerating annual EPS trend, severe debt risk, repeated losses, large unexplained volatility, or insufficient core EPS history.
 - Red flags should be explicit, but do not list mere absence of institutional/product/sector data as a red flag unless it is the primary available evidence.
+- Consensus is supporting evidence only. Positive revisions can strengthen confidence; weak, missing, or stale consensus should not override strong reported earnings by itself.
+- The advisory buy opinion must consider reported growth, consensus, market regime, and the fact that actual entry still requires the system's price/signal/risk rules.
 
 Verdict policy:
 - Choose PASS only when the candidate has at least 3 consecutive profitable annual EPS records, strong current/annual EPS growth, and no clear core financial contradiction, especially if rs_rating >= 80, minervini_pass is true, or custom_composite_score is strong.
 - Do not choose PASS for pure turnarounds. Require evidence of sustained positive earnings growth, not merely recovery from losses.
 - Choose WATCH when growth exists but the core evidence is mixed, unstable, very incomplete, or materially risky.
 - Choose FAIL when core earnings/revenue evidence is weak or contradicts growth-stock suitability.
+
+Advisory buy opinion policy:
+- opinion must be one of BUY_CANDIDATE, WAIT, or NO_BUY.
+- BUY_CANDIDATE means the report supports a human reference view that this is a buy candidate if, and only if, the separate system entry signal and risk checks trigger.
+- WAIT means the stock may remain watchable, but current reported/consensus/market evidence argues for patience.
+- NO_BUY means even as a reference opinion the setup is unattractive.
+- If verdict is WATCH or FAIL, advisory opinion should normally be WAIT or NO_BUY unless you explain a narrow exception.
+- Always set reference_only=true and not_included_in_trade_gate=true.
 
 Scoring:
 - 90-100: exceptional CANSLIM/Minervini fit
@@ -596,6 +804,43 @@ Input data:
 Return this exact JSON schema:
 {{
   "verdict": "PASS | WATCH | FAIL",
+  "company_profile": "한국어 2-3문장 회사/사업 설명",
+  "latest_quarter_report_summary": {{
+    "period": "최신 분기",
+    "report_date": "결산 기준일 또는 데이터 없음",
+    "summary": "최신 분기 결산보고서 핵심 요약",
+    "revenue": "매출 수치 또는 데이터 없음",
+    "eps": "EPS 수치 또는 데이터 없음",
+    "net_income": "순이익 수치 또는 데이터 없음",
+    "yoy_growth": {{
+      "revenue": "전년동기 대비 매출 변화 또는 비교 데이터 없음",
+      "eps": "전년동기 대비 EPS 변화 또는 비교 데이터 없음",
+      "net_income": "전년동기 대비 순이익 변화 또는 비교 데이터 없음"
+    }},
+    "qoq_growth": {{
+      "revenue": "직전분기 대비 매출 변화 또는 비교 데이터 없음",
+      "eps": "직전분기 대비 EPS 변화 또는 비교 데이터 없음",
+      "net_income": "직전분기 대비 순이익 변화 또는 비교 데이터 없음"
+    }},
+    "recent_quarter_trend": "최근 분기 흐름 요약"
+  }},
+  "consensus_summary": {{
+    "available": boolean,
+    "summary": "컨센서스 핵심 요약 또는 데이터 없음",
+    "next_quarter": "다음 분기 EPS/매출 컨센서스 요약 또는 데이터 없음",
+    "current_year": "현재 연도 EPS/매출 컨센서스 요약 또는 데이터 없음",
+    "next_year": "다음 연도 EPS/매출 컨센서스 요약 또는 데이터 없음",
+    "estimate_revisions": "추정치 상향/하향 리비전 요약 또는 데이터 없음",
+    "analyst_rating": "애널리스트 투자의견 요약 또는 데이터 없음"
+  }},
+  "advisory_buy_opinion": {{
+    "reference_only": true,
+    "opinion": "BUY_CANDIDATE | WAIT | NO_BUY",
+    "confidence": number,
+    "reason": "한국어 참고용 매수 의견 설명",
+    "conditions": ["한국어 조건"],
+    "not_included_in_trade_gate": true
+  }},
   "canslim_fit_score": number,
   "minervini_fit_score": number,
   "overall_fit_score": number,

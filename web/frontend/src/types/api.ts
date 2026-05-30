@@ -151,6 +151,43 @@ export interface StockReportBreakdownItem {
 
 export interface StockReportJson {
   verdict: 'PASS' | 'WATCH' | 'FAIL';
+  company_profile?: string;
+  latest_quarter_report_summary?: {
+    period: string;
+    report_date: string;
+    summary: string;
+    revenue: string;
+    eps: string;
+    net_income: string;
+    yoy_growth: {
+      revenue: string;
+      eps: string;
+      net_income: string;
+    };
+    qoq_growth: {
+      revenue: string;
+      eps: string;
+      net_income: string;
+    };
+    recent_quarter_trend: string;
+  };
+  consensus_summary?: {
+    available: boolean;
+    summary: string;
+    next_quarter: string;
+    current_year: string;
+    next_year: string;
+    estimate_revisions: string;
+    analyst_rating: string;
+  };
+  advisory_buy_opinion?: {
+    reference_only: boolean;
+    opinion: 'BUY_CANDIDATE' | 'WAIT' | 'NO_BUY';
+    confidence: number;
+    reason: string;
+    conditions: string[];
+    not_included_in_trade_gate: boolean;
+  };
   canslim_fit_score: number;
   minervini_fit_score: number;
   overall_fit_score: number;

@@ -16,6 +16,12 @@ function verdictVariant(verdict: string) {
   return 'default';
 }
 
+function advisoryVariant(opinion: string) {
+  if (opinion === 'BUY_CANDIDATE') return 'success';
+  if (opinion === 'NO_BUY') return 'danger';
+  return 'default';
+}
+
 function formatDate(value: string | null | undefined): string {
   if (!value) return '—';
   const d = new Date(value);
@@ -55,6 +61,15 @@ function BulletList({ title, items, color }: { title: string; items: string[]; c
   );
 }
 
+function FieldRow({ label, value }: { label: string; value: string | undefined }) {
+  return (
+    <div>
+      <p className="text-xs text-slate-500">{label}</p>
+      <p className="mt-1 text-sm leading-relaxed text-slate-300 whitespace-pre-wrap">{value || '데이터 없음'}</p>
+    </div>
+  );
+}
+
 function ReportBody({ report }: { report: StockReportJson }) {
   const canslimKeys = ['C', 'A', 'N', 'S', 'L', 'I', 'M'];
   return (
@@ -75,6 +90,63 @@ function ReportBody({ report }: { report: StockReportJson }) {
         <h3 className="text-sm font-semibold text-slate-200">요약</h3>
         <p className="mt-2 text-sm leading-relaxed text-slate-300 whitespace-pre-wrap">{report.summary}</p>
       </section>
+
+      {report.company_profile && (
+        <section>
+          <h3 className="text-sm font-semibold text-slate-200">회사 개요</h3>
+          <p className="mt-2 text-sm leading-relaxed text-slate-300 whitespace-pre-wrap">{report.company_profile}</p>
+        </section>
+      )}
+
+      {report.latest_quarter_report_summary && (
+        <section>
+          <h3 className="text-sm font-semibold text-slate-200">최신분기 결산보고서 요약</h3>
+          <p className="mt-2 text-sm leading-relaxed text-slate-300 whitespace-pre-wrap">
+            {report.latest_quarter_report_summary.summary}
+          </p>
+          <div className="mt-3 grid gap-3 md:grid-cols-3">
+            <FieldRow label="매출" value={report.latest_quarter_report_summary.revenue} />
+            <FieldRow label="EPS" value={report.latest_quarter_report_summary.eps} />
+            <FieldRow label="순이익" value={report.latest_quarter_report_summary.net_income} />
+            <FieldRow label="매출 YoY / QoQ" value={`${report.latest_quarter_report_summary.yoy_growth?.revenue ?? '데이터 없음'} / ${report.latest_quarter_report_summary.qoq_growth?.revenue ?? '데이터 없음'}`} />
+            <FieldRow label="EPS YoY / QoQ" value={`${report.latest_quarter_report_summary.yoy_growth?.eps ?? '데이터 없음'} / ${report.latest_quarter_report_summary.qoq_growth?.eps ?? '데이터 없음'}`} />
+            <FieldRow label="순이익 YoY / QoQ" value={`${report.latest_quarter_report_summary.yoy_growth?.net_income ?? '데이터 없음'} / ${report.latest_quarter_report_summary.qoq_growth?.net_income ?? '데이터 없음'}`} />
+          </div>
+          <p className="mt-3 text-sm leading-relaxed text-slate-300 whitespace-pre-wrap">
+            {report.latest_quarter_report_summary.recent_quarter_trend}
+          </p>
+        </section>
+      )}
+
+      {report.consensus_summary && (
+        <section>
+          <h3 className="text-sm font-semibold text-slate-200">컨센서스 요약</h3>
+          <p className="mt-2 text-sm leading-relaxed text-slate-300 whitespace-pre-wrap">{report.consensus_summary.summary}</p>
+          <div className="mt-3 grid gap-3 md:grid-cols-2">
+            <FieldRow label="다음 분기" value={report.consensus_summary.next_quarter} />
+            <FieldRow label="올해" value={report.consensus_summary.current_year} />
+            <FieldRow label="내년" value={report.consensus_summary.next_year} />
+            <FieldRow label="추정치 리비전" value={report.consensus_summary.estimate_revisions} />
+            <FieldRow label="투자의견" value={report.consensus_summary.analyst_rating} />
+          </div>
+        </section>
+      )}
+
+      {report.advisory_buy_opinion && (
+        <section>
+          <div className="flex flex-wrap items-center gap-3">
+            <h3 className="text-sm font-semibold text-slate-200">AI 참고 매수 의견</h3>
+            <Badge variant={advisoryVariant(report.advisory_buy_opinion.opinion)}>
+              {report.advisory_buy_opinion.opinion}
+            </Badge>
+            <span className="text-xs text-slate-500">
+              참고용 · 게이트 미반영 · 신뢰도 {formatScore(report.advisory_buy_opinion.confidence)}
+            </span>
+          </div>
+          <p className="mt-2 text-sm leading-relaxed text-slate-300 whitespace-pre-wrap">{report.advisory_buy_opinion.reason}</p>
+          <BulletList title="조건" items={report.advisory_buy_opinion.conditions ?? []} color="text-cyan-400" />
+        </section>
+      )}
 
       <div className="grid gap-4 md:grid-cols-2">
         <section>
