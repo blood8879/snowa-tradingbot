@@ -57,7 +57,7 @@ class Settings(BaseSettings):
     # ── AI Stock Reports ─────────────────────────────────────
     ai_report_provider: str = "openai"  # openai, anthropic, or disabled
     ai_report_model: str = "gpt-4.1-mini"
-    ai_report_prompt_version: str = "canslim_ko_v4_1"
+    ai_report_prompt_version: str = "canslim_ko_v4_2"
     ai_report_auto_generate: bool = True
     ai_report_trade_gate_enabled: bool = True
     ai_report_filter_watchlist_to_pass: bool = True

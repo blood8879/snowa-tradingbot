@@ -16,10 +16,11 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+import csv
 import io
 import time
-import zipfile
 import xml.etree.ElementTree as ET
+import zipfile
 from datetime import datetime
 from pathlib import Path
 
@@ -36,6 +37,7 @@ logger = structlog.get_logger(__name__)
 
 _CORP_CODE_URL = "https://opendart.fss.or.kr/api/corpCode.xml"
 _FINSTATE_URL = "https://opendart.fss.or.kr/api/fnlttSinglAcnt.json"
+_COMPANY_URL = "https://opendart.fss.or.kr/api/company.json"
 
 # Rate limit: DART allows ~100 requests/min
 _RATE_LIMIT_CALLS_PER_SEC = 1.5  # ~90/min, safe margin
@@ -62,6 +64,7 @@ class DartFinancialFetcher:
         self._api_key = api_key
         self._cache_dir = Path(cache_dir)
         self._corp_codes: dict[str, str] = {}  # stock_code → corp_code
+        self._corp_names: dict[str, str] = {}  # stock_code → corp_name
         self._loaded = False
         self._last_call_time: float = 0.0
 
@@ -119,8 +122,9 @@ class DartFinancialFetcher:
 
         root = ET.fromstring(xml_data)
         self._corp_codes.clear()
+        self._corp_names.clear()
 
-        lines = ["stock_code,corp_code,corp_name"]
+        rows = [["stock_code", "corp_code", "corp_name"]]
         for corp in root.findall("list"):
             stock_code = (corp.findtext("stock_code") or "").strip()
             corp_code = (corp.findtext("corp_code") or "").strip()
@@ -128,19 +132,86 @@ class DartFinancialFetcher:
 
             if stock_code and corp_code:
                 self._corp_codes[stock_code] = corp_code
-                lines.append(f"{stock_code},{corp_code},{corp_name}")
+                self._corp_names[stock_code] = corp_name
+                rows.append([stock_code, corp_code, corp_name])
 
         # Save cache
         self._cache_dir.mkdir(parents=True, exist_ok=True)
-        cache_path.write_text("\n".join(lines), encoding="utf-8")
+        with cache_path.open("w", encoding="utf-8", newline="") as fh:
+            csv.writer(fh).writerows(rows)
 
     def _load_corp_code_cache(self, cache_path: Path) -> None:
         """Load corp codes from CSV cache."""
         self._corp_codes.clear()
-        for line in cache_path.read_text(encoding="utf-8").splitlines()[1:]:
-            parts = line.split(",", 2)
-            if len(parts) >= 2:
-                self._corp_codes[parts[0]] = parts[1]
+        self._corp_names.clear()
+        with cache_path.open("r", encoding="utf-8", newline="") as fh:
+            for row in csv.DictReader(fh):
+                stock_code = (row.get("stock_code") or "").strip()
+                corp_code = (row.get("corp_code") or "").strip()
+                corp_name = (row.get("corp_name") or "").strip()
+                if stock_code and corp_code:
+                    self._corp_codes[stock_code] = corp_code
+                    self._corp_names[stock_code] = corp_name
+
+    async def fetch_company_profile(self, stock_code: str) -> dict | None:
+        """Fetch DART company overview metadata for a listed Korean company."""
+        if not self._loaded:
+            await self.load_corp_codes()
+
+        corp_code = self._corp_codes.get(stock_code)
+        if not corp_code:
+            return None
+
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            None,
+            self._fetch_company_profile_sync,
+            stock_code,
+            corp_code,
+        )
+
+    def _fetch_company_profile_sync(self, stock_code: str, corp_code: str) -> dict | None:
+        self._rate_limit()
+        try:
+            resp = requests.get(
+                _COMPANY_URL,
+                params={"crtfc_key": self._api_key, "corp_code": corp_code},
+                timeout=10,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception:
+            logger.debug("dart_company_profile_fetch_failed", stock_code=stock_code, exc_info=True)
+            return None
+
+        if data.get("status") != "000":
+            logger.debug(
+                "dart_company_profile_unavailable",
+                stock_code=stock_code,
+                status=data.get("status"),
+                message=data.get("message"),
+            )
+            return None
+
+        return {
+            "corp_code": corp_code,
+            "corp_name": data.get("corp_name") or self._corp_names.get(stock_code),
+            "corp_name_eng": data.get("corp_name_eng"),
+            "stock_name": data.get("stock_name"),
+            "stock_code": data.get("stock_code") or stock_code,
+            "ceo_nm": data.get("ceo_nm"),
+            "corp_cls": data.get("corp_cls"),
+            "jurir_no": data.get("jurir_no"),
+            "bizr_no": data.get("bizr_no"),
+            "address": data.get("adres"),
+            "homepage": data.get("hm_url"),
+            "ir_homepage": data.get("ir_url"),
+            "phone": data.get("phn_no"),
+            "fax": data.get("fax_no"),
+            "industry_code": data.get("induty_code"),
+            "established_date": data.get("est_dt"),
+            "fiscal_year_end_month": data.get("acc_mt"),
+        }
 
     # ── Financial Data Fetching ───────────────────────────────
 

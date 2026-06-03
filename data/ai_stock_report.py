@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 from datetime import datetime, timezone
 from typing import Any
 
@@ -329,13 +330,16 @@ class StockReportService:
 
     async def _enrich_report_context(self, context: dict[str, Any]) -> dict[str, Any]:
         """Add slower external research fields only when a fresh report is needed."""
+        if context["market"] == "KR":
+            context["company_profile"] = await self._fetch_dart_company_profile(context)
+            context["consensus_payload"] = self._empty_consensus_payload(context["market"])
+            return context
+
         if context["market"] != "US":
-            context["company_profile"] = {
-                "available": False,
-                "summary": "국내 종목의 사업 설명 데이터 소스가 연결되어 있지 않습니다.",
-                "sector": context["watchlist_metrics"].get("sector"),
-                "industry": context["watchlist_metrics"].get("industry"),
-            }
+            context["company_profile"] = self._unavailable_company_profile(
+                context,
+                "해당 시장의 회사 개요 데이터 소스가 연결되어 있지 않습니다.",
+            )
             context["consensus_payload"] = self._empty_consensus_payload(context["market"])
             return context
 
@@ -359,6 +363,103 @@ class StockReportService:
         context["company_profile"] = enrichment["company_profile"]
         context["consensus_payload"] = enrichment["consensus_payload"]
         return context
+
+    async def _fetch_dart_company_profile(self, context: dict[str, Any]) -> dict[str, Any]:
+        dart_api_key = os.environ.get("DART_API_KEY", "a9a83a37044c92dda80876d98c108d112c89136b")
+        if not dart_api_key:
+            return self._unavailable_company_profile(
+                context,
+                "DART_API_KEY가 설정되어 있지 않아 국내 기업개황을 가져오지 못했습니다.",
+            )
+
+        try:
+            from data.dart_financial import DartFinancialFetcher
+
+            fetcher = DartFinancialFetcher(
+                api_key=dart_api_key,
+                cache_dir=str(self._settings.db_full_path.parent),
+            )
+            profile = await fetcher.fetch_company_profile(context["ticker"])
+        except Exception:
+            logger.warning(
+                "ai_report_dart_company_profile_failed",
+                ticker=context["ticker"],
+                exc_info=True,
+            )
+            return self._unavailable_company_profile(
+                context,
+                "DART 기업개황 조회에 실패했습니다.",
+            )
+
+        if not profile:
+            return self._unavailable_company_profile(
+                context,
+                "DART 기업개황 데이터를 찾지 못했습니다.",
+            )
+
+        company_name = (
+            profile.get("stock_name")
+            or profile.get("corp_name")
+            or context.get("company_name")
+            or context["ticker"]
+        )
+        industry_code = profile.get("industry_code") or "업종코드 없음"
+        ceo = profile.get("ceo_nm") or "대표자 데이터 없음"
+        established = self._format_dart_date(profile.get("established_date"))
+        homepage = profile.get("homepage") or profile.get("ir_homepage") or "홈페이지 데이터 없음"
+        address = profile.get("address") or "주소 데이터 없음"
+        subject = self._with_korean_topic_particle(str(company_name))
+        summary = (
+            f"{subject} DART 기업개황 기준 업종코드 {industry_code}에 속한 국내 상장사입니다. "
+            f"대표자는 {ceo}, 설립일은 {established}, 본점 소재지는 {address}입니다. "
+            f"홈페이지는 {homepage}입니다."
+        )
+        return {
+            "available": True,
+            "source": "DART company.json",
+            "name": company_name,
+            "corp_name": profile.get("corp_name"),
+            "corp_name_eng": profile.get("corp_name_eng"),
+            "sector": context["watchlist_metrics"].get("sector"),
+            "industry": context["watchlist_metrics"].get("industry"),
+            "industry_code": profile.get("industry_code"),
+            "corp_cls": profile.get("corp_cls"),
+            "ceo": profile.get("ceo_nm"),
+            "established_date": established,
+            "homepage": homepage,
+            "ir_homepage": profile.get("ir_homepage"),
+            "address": address,
+            "fiscal_year_end_month": profile.get("fiscal_year_end_month"),
+            "summary": summary,
+        }
+
+    def _unavailable_company_profile(self, context: dict[str, Any], reason: str) -> dict[str, Any]:
+        return {
+            "available": False,
+            "reason": reason,
+            "name": context.get("company_name") or context["ticker"],
+            "sector": context["watchlist_metrics"].get("sector"),
+            "industry": context["watchlist_metrics"].get("industry"),
+            "summary": reason,
+        }
+
+    @staticmethod
+    def _format_dart_date(value: Any) -> str:
+        text = str(value or "").strip()
+        if len(text) == 8 and text.isdigit():
+            return f"{text[:4]}-{text[4:6]}-{text[6:]}"
+        return text or "설립일 데이터 없음"
+
+    @staticmethod
+    def _with_korean_topic_particle(value: str) -> str:
+        if not value:
+            return value
+        last = value[-1]
+        code = ord(last)
+        if 0xAC00 <= code <= 0xD7A3:
+            has_batchim = (code - 0xAC00) % 28 != 0
+            return f"{value}{'은' if has_batchim else '는'}"
+        return f"{value}는"
 
     @staticmethod
     def _empty_consensus_payload(market: str) -> dict[str, Any]:
