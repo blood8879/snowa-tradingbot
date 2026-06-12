@@ -283,8 +283,30 @@ class WatchlistManager:
             except Exception:
                 pass
 
+            # 섹터/업종 분류 — 상관 한도(업종 6유닛/섹터 10유닛) 체크에 필수.
+            # DB 기존값 재사용으로 yfinance 반복 조회를 방지하고,
+            # US 신규 종목만 yfinance info에서 1회 조회해 채운다.
             sector = None
             industry = None
+            try:
+                cursor = await self._db.conn.execute(
+                    "SELECT sector, industry FROM watchlist WHERE ticker = ?",
+                    (ticker,),
+                )
+                row = await cursor.fetchone()
+                if row:
+                    sector, industry = row[0], row[1]
+            except Exception:
+                pass
+            if market == "US" and (not sector or not industry):
+                try:
+                    import asyncio as _asyncio
+                    import yfinance as _yf
+                    info = await _asyncio.to_thread(lambda: _yf.Ticker(ticker).info)
+                    sector = sector or info.get("sector")
+                    industry = industry or info.get("industry")
+                except Exception:
+                    logger.debug("watchlist_sector_fetch_failed", ticker=ticker)
             market_cap = None
             # Exchange 폴백: universe → DB 기존값 → market 기반 기본값
             exchange = None

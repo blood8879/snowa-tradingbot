@@ -35,6 +35,7 @@ class BreakoutTracker:
         system: str,
         breakout_price: float,
         was_entered: bool,
+        breakout_date: str | None = None,
     ) -> int:
         """Record a new breakout event in the ``breakout_history`` table.
 
@@ -44,11 +45,13 @@ class BreakoutTracker:
             breakout_price: Price at which the breakout occurred.
             was_entered: Whether the position was actually entered
                 (False if the System 1 filter skipped it).
+            breakout_date: ISO date of the breakout bar. Defaults to now
+                (used for intraday entries; daily scans pass the bar date).
 
         Returns:
             The ``ROWID`` of the newly inserted record.
         """
-        now = datetime.utcnow().isoformat()
+        now = breakout_date or datetime.utcnow().isoformat()
         cursor = await self._db.conn.execute(
             """
             INSERT INTO breakout_history
@@ -103,6 +106,35 @@ class BreakoutTracker:
         if row is None or row[0] is None:
             return None
         return bool(row[0])
+
+    async def get_open_breakout(self, ticker: str) -> dict | None:
+        """Return the most recent unresolved S1 breakout for *ticker*.
+
+        A breakout is "open" while its hypothetical outcome
+        (``would_have_been_winner``) has not yet been determined.
+
+        Args:
+            ticker: Stock ticker symbol.
+
+        Returns:
+            Dict of the row, or None if no open breakout exists.
+        """
+        cursor = await self._db.conn.execute(
+            """
+            SELECT *
+            FROM breakout_history
+            WHERE ticker = ? AND system = 'S1'
+              AND would_have_been_winner IS NULL
+            ORDER BY breakout_date DESC
+            LIMIT 1
+            """,
+            (ticker,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        columns = [desc[0] for desc in cursor.description]
+        return dict(zip(columns, row))
 
     # ────────────────────────────────────────────────────────────
     # Update breakout outcome

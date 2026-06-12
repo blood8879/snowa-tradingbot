@@ -82,6 +82,10 @@ class PostMarketProcessor:
         # Step 2: 미체결 주문 처리
         cancelled_count = await self._process_unfilled_orders(market=market)
 
+        # Step 2.5: 종가 기준 Donchian 청산 확인 (명세 §8.4)
+        # — 장중 WS 침묵 등으로 청산 신호를 놓친 경우의 백업 경로
+        donchian_flagged = await self._check_donchian_exits_on_close(market=market)
+
         # Step 3: 일일 리포트 생성 및 DB 저장
         daily_log = await self._generate_daily_report(market=market)
 
@@ -95,6 +99,7 @@ class PostMarketProcessor:
         summary = {
             "sync_result": sync_result,
             "cancelled_orders": cancelled_count,
+            "donchian_exit_flagged": donchian_flagged,
             "daily_log": daily_log,
         }
 
@@ -122,7 +127,7 @@ class PostMarketProcessor:
             ``AccountManager.sync_positions()`` 결과 dict.
         """
         try:
-            result = await self._account_mgr.sync_positions()
+            result = await self._account_mgr.sync_positions(market=market)
             logger.info(
                 "post_market_sync_done",
                 market=market,
@@ -221,6 +226,74 @@ class PostMarketProcessor:
             cancelled=cancelled_count,
         )
         return cancelled_count
+
+    # ── Step 2.5: Close-based Donchian Exit (backup) ─────────
+
+    async def _check_donchian_exits_on_close(self, market: str = "US") -> int:
+        """종가 기준 Donchian 청산 백업 체크 (명세 §8.4: 종가 기준 판단).
+
+        장중 마감 15분 전 윈도우에서 해당 종목 틱이 수신되지 않으면
+        (WS 침묵 등) 청산 신호가 통째로 누락될 수 있다. 장 종료 후
+        당일 확정 종가로 S1: 10일 / S2: 20일 최저가 이탈을 재확인하고,
+        이탈 시 force_exit 플래그를 세워 다음 세션 개장 직후 청산한다.
+
+        Returns:
+            플래그가 세팅된 포지션 수.
+        """
+        flagged = 0
+        try:
+            open_positions = await self._position_mgr.get_open_positions()
+            market_positions = [p for p in open_positions if p.market == market]
+            if not market_positions:
+                return 0
+
+            # 당일 종가 확보 (post_market 시점엔 캐시가 전일까지일 수 있음)
+            tickers = [p.ticker for p in market_positions]
+            try:
+                if market == "KR":
+                    await self._price_cache.bulk_load_from_pykrx(tickers, days=5)
+                else:
+                    await self._price_cache.bulk_load_from_yfinance(tickers, period="5d")
+            except Exception:
+                logger.exception("post_market_donchian_price_refresh_failed", market=market)
+
+            for pos in market_positions:
+                if getattr(pos, "force_exit_flag", None):
+                    continue  # 이미 강제 청산 예약됨
+
+                bars = await self._price_cache.get_ohlcv(pos.ticker, 30)
+                if len(bars) < 21:
+                    continue
+
+                system = pos.system.value if hasattr(pos.system, "value") else str(pos.system)
+                exit_days = 10 if system == "S1" else 20
+
+                last = bars[-1]
+                # 당일 봉 제외한 직전 exit_days일 최저가
+                prior_lower = min(b.low for b in bars[-(exit_days + 1):-1])
+
+                if last.close <= prior_lower:
+                    await self._db.set_force_exit_flag(
+                        ticker=pos.ticker,
+                        flag="DONCHIAN_EXIT_CLOSE",
+                        reason=(
+                            f"{system} close {last.close} <= "
+                            f"{exit_days}-day low {prior_lower} ({last.date})"
+                        ),
+                    )
+                    flagged += 1
+                    logger.warning(
+                        "post_market_donchian_exit_flagged",
+                        ticker=pos.ticker,
+                        market=market,
+                        system=system,
+                        close=last.close,
+                        exit_level=prior_lower,
+                    )
+        except Exception:
+            logger.exception("post_market_donchian_exit_check_failed", market=market)
+
+        return flagged
 
     # ── Step 3: Daily Report ─────────────────────────────────
 

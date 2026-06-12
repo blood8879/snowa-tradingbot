@@ -217,6 +217,23 @@ class IntradayMonitor:
         """종목명 조회 (없으면 빈 문자열)."""
         return self._stock_names.get(ticker, "")
 
+    def _position_market_value(self, open_positions: list) -> float:
+        """같은 시장 포지션의 평가액 합계 (명세 §10 ACCOUNT_EQUITY_BASIS="TOTAL").
+
+        최근 틱 가격 기준으로 평가하며, 틱이 없는 종목은 원가(total_cost)로
+        fallback한다. (Bug #19: 같은 시장만 합산 — KRW/USD 혼합 방지)
+        """
+        total = 0.0
+        for p in open_positions:
+            if p.market != self._market:
+                continue
+            last_price = self._last_prices.get(p.ticker)
+            if last_price and last_price > 0:
+                total += last_price * p.total_shares
+            else:
+                total += p.total_cost
+        return total
+
     def _load_stock_names(self) -> None:
         """KR 종목명 CSV 로드."""
         if self._market != "KR":
@@ -435,22 +452,6 @@ class IntradayMonitor:
             logger.debug("stop_loss_skipped_pending_order", ticker=ticker)
             return
 
-        # Layer 1: 장 마감 임박 시 주문 submit 대신 force_exit 플래그로 다음 세션 강제 청산
-        if self._is_close_imminent():
-            await self._db.set_force_exit_flag(
-                ticker=ticker,
-                flag="MARKET_CLOSED",
-                reason=f"stop triggered near close (price={price}, stop={getattr(position, 'current_stop_price', 0)})",
-            )
-            logger.warning(
-                "stop_loss_deferred_near_close",
-                ticker=ticker,
-                price=price,
-                market=self._market,
-                msg="장 마감 임박 → 주문 skip, 다음 세션 강제 청산 예약",
-            )
-            return
-
         logger.warning(
             "stop_loss_triggered",
             ticker=ticker,
@@ -496,6 +497,26 @@ class IntradayMonitor:
                         reason="STOP_LOSS_BROKER_CONFIRMED",
                         exit_price=price,
                     )
+                return
+
+            # 명세 §8.3: 손절은 즉시 실행을 시도한다. 마감 임박으로 주문이
+            # 거부된 경우에만 force_exit 플래그로 다음 세션 강제 청산을 예약.
+            if self._is_close_imminent():
+                await self._db.set_force_exit_flag(
+                    ticker=ticker,
+                    flag="MARKET_CLOSED",
+                    reason=(
+                        f"stop order failed near close "
+                        f"(price={price}, stop={getattr(position, 'current_stop_price', 0)})"
+                    ),
+                )
+                logger.warning(
+                    "stop_loss_failed_near_close_deferred",
+                    ticker=ticker,
+                    price=price,
+                    market=self._market,
+                    msg="마감 임박 주문 실패 → 다음 세션 강제 청산 예약",
+                )
                 return
 
             self._stop_loss_cooldown[ticker] = time.monotonic()
@@ -548,8 +569,7 @@ class IntradayMonitor:
             self._pyramid_cooldown[ticker] = time.monotonic()
             return
         open_positions = await self._position_mgr.get_open_positions()
-        # Bug #19 fix: 같은 시장의 포지션만 합산 (KRW/USD 혼합 방지)
-        total_position_value = sum(p.total_cost for p in open_positions if p.market == self._market)
+        total_position_value = self._position_market_value(open_positions)
         account_equity = cash + total_position_value
 
         # 터틀 원칙: 모든 unit은 1차 진입 시 결정된 동일 shares를 사용한다.
@@ -722,9 +742,32 @@ class IntradayMonitor:
             return
 
         open_positions = await self._position_mgr.get_open_positions()
-        # Bug #19 fix: 같은 시장의 포지션만 합산 (KRW/USD 혼합 방지)
-        total_position_value = sum(p.total_cost for p in open_positions if p.market == self._market)
+        total_position_value = self._position_market_value(open_positions)
         account_equity = cash + total_position_value
+
+        # CANSLIM 워치리스트 재확인 (명세 §5.3 2단계) + ADV 조회
+        # — 보유 중 탈락한 종목이 청산 후 같은 세션에 재진입하는 것을 차단
+        avg_daily_volume: int | None = None
+        try:
+            wl_cursor = await self._db.conn.execute(
+                "SELECT status, avg_daily_volume FROM watchlist WHERE ticker = ?",
+                (ticker,),
+            )
+            wl_status_row = await wl_cursor.fetchone()
+        except Exception:
+            wl_status_row = None
+        if wl_status_row is None or wl_status_row[0] != "ACTIVE":
+            logger.info(
+                "entry_blocked_not_in_watchlist",
+                ticker=ticker,
+                status=wl_status_row[0] if wl_status_row else None,
+            )
+            self._entry_cooldown[ticker] = time.monotonic() + (
+                self._RISK_BLOCK_COOLDOWN - self._SIGNAL_COOLDOWN
+            )
+            return
+        if wl_status_row[1]:
+            avg_daily_volume = int(wl_status_row[1])
 
         # 포지션 사이징 (YELLOW 레짐이면 account_equity 절반으로 축소 → 유닛 사이즈 절반)
         effective_equity = account_equity * self.market_regime_scale
@@ -732,6 +775,7 @@ class IntradayMonitor:
             account_equity=effective_equity,
             entry_price=price,
             n_value=signals.n_value,
+            avg_daily_volume=avg_daily_volume,
             market=self._market,
         )
         if sizing["skip"]:
@@ -858,6 +902,19 @@ class IntradayMonitor:
             price=price,
             stop_price=stop_price,
         )
+
+        # System 1 필터용 돌파 기록 (명세 §5.1) — 가상 결과는 pre_market이 일봉으로 판정
+        if system == "S1":
+            try:
+                if await self._breakout_tracker.get_open_breakout(ticker) is None:
+                    await self._breakout_tracker.record_breakout(
+                        ticker=ticker,
+                        system="S1",
+                        breakout_price=entry_signal.get("breakout_level") or price,
+                        was_entered=True,
+                    )
+            except Exception:
+                logger.exception("entry_breakout_record_failed", ticker=ticker)
 
         # 이벤트 발행
         signal = TradeSignal(

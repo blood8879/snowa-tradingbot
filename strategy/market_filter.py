@@ -7,10 +7,12 @@ Signals:
   3. Benchmark 125-day Rate of Change (momentum)
 
 Regime determination:
-  RED    — breadth < 35% AND ROC < -5% (both must be bad)
-  YELLOW — benchmark < 200 SMA, OR one of breadth/ROC is weak
+  RED    — benchmark < 200 SMA (hard gate per TURTLE_TRADING_STRATEGY.md §2),
+           OR breadth < 35% AND ROC < -5% (both bad)
+  YELLOW — SMA pass but one of breadth/ROC is weak
   GREEN  — all signals healthy (SMA pass + breadth OK + ROC OK)
 
+Data unavailable / errors → fail-closed (RED, entries blocked) per spec §2.3.
 Existing positions continue to be managed by Turtle exit rules.
 """
 
@@ -90,13 +92,14 @@ def determine_regime(
     roc_ok = roc is None or roc >= MARKET_ROC_WARNING
     roc_bad = roc is not None and roc < MARKET_ROC_WARNING
 
-    # Both breadth AND ROC bad → RED (regardless of SMA)
-    if breadth_bad and roc_bad:
+    # SMA failure → RED. Spec §2.2: benchmark below 200 SMA blocks all
+    # new entries — this is the hard gate, not a half-size warning.
+    if not sma_pass:
         return "RED", 0.0
 
-    # SMA failure alone → YELLOW (not RED)
-    if not sma_pass:
-        return "YELLOW", MARKET_REGIME_YELLOW_SCALE
+    # Both breadth AND ROC bad → RED (extra conservative layer)
+    if breadth_bad and roc_bad:
+        return "RED", 0.0
 
     # SMA pass + both good → GREEN
     if breadth_ok and roc_ok:
@@ -194,13 +197,14 @@ async def get_market_filter_status(
     mkt_cfg = get_market_config(market)
     benchmark = mkt_cfg.benchmark_ticker
 
-    fail_open = {
+    # Spec §2.3: insufficient data → block new entries (fail-closed).
+    fail_closed = {
         "benchmark": benchmark,
         "close": 0,
         "sma200": 0,
-        "filter_pass": True,
-        "regime": "GREEN",
-        "regime_scale": 1.0,
+        "filter_pass": False,
+        "regime": "RED",
+        "regime_scale": 0.0,
         "breadth_pct": None,
         "roc_125": None,
         "market": market,
@@ -216,7 +220,7 @@ async def get_market_filter_status(
                 benchmark=benchmark,
                 market=market,
             )
-            return fail_open
+            return fail_closed
 
         sma_pass = check_market_filter(close, sma200)
 
@@ -261,4 +265,4 @@ async def get_market_filter_status(
 
     except Exception:
         logger.exception("market_filter_error", benchmark=benchmark, market=market)
-        return fail_open
+        return fail_closed

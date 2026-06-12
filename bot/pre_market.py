@@ -23,8 +23,10 @@ from config.market_config import get_market_config
 from core.database import Database
 from core.models import DonchianLevels, PrecomputedSignals
 from data.price_cache import PriceCache
+from portfolio.correlation_groups import CorrelationGroupManager
 from portfolio.position_manager import PositionManager
 from strategy.atr import calculate_n_from_ohlcv
+from strategy.breakout_tracker import BreakoutTracker
 from strategy.donchian import build_donchian_levels_model
 from strategy.market_filter import get_market_filter_status
 from strategy.pyramiding import calculate_pyramid_price
@@ -57,13 +59,16 @@ class PreMarketPreparer:
         rest_client: KISRestClient,
         account_mgr: AccountManager,
         position_mgr: PositionManager,
+        correlation_mgr: CorrelationGroupManager | None = None,
     ) -> None:
         self._db = db
         self._auth = auth
         self._rest = rest_client
         self._account_mgr = account_mgr
         self._position_mgr = position_mgr
+        self._correlation_mgr = correlation_mgr
         self._price_cache = PriceCache(db)
+        self._breakout_tracker = BreakoutTracker(db)
 
     # ── Public API ───────────────────────────────────────────
 
@@ -92,6 +97,9 @@ class PreMarketPreparer:
 
         # Step 2: 가격 데이터 갱신
         watchlist_tickers, position_tickers = await self._update_price_data(market)
+
+        # Step 2.5: 상관 그룹(섹터/업종) 등록 — 6/10유닛 한도 데이터 공급
+        await self._register_correlation_groups(market)
 
         # Step 3: 시그널 계산 (ATR, Donchian, 트리거 가격)
         all_tickers = list(set(watchlist_tickers + position_tickers))
@@ -248,6 +256,93 @@ class PreMarketPreparer:
                 market=market,
             )
 
+    # ── Step 2.5: Correlation Groups ─────────────────────────
+
+    async def _register_correlation_groups(self, market: str) -> None:
+        """워치리스트/보유종목의 섹터·업종을 CorrelationGroupManager에 등록한다.
+
+        등록이 없으면 상관 한도(업종 6유닛 / 섹터 10유닛) 체크가
+        항상 0으로 계산되어 무력화되므로, 매 장전마다 갱신한다.
+        분류가 없는 종목은 종목별 고유 placeholder를 부여해
+        '미분류' 그룹으로 잘못 묶이는 것을 방지한다.
+        """
+        if self._correlation_mgr is None:
+            return
+
+        registered = 0
+        try:
+            for query in (
+                "SELECT ticker, sector, industry FROM watchlist",
+                "SELECT ticker, sector, industry FROM positions WHERE status = 'OPEN'",
+            ):
+                cursor = await self._db.conn.execute(query)
+                rows = await cursor.fetchall()
+                for ticker, sector, industry in rows:
+                    self._correlation_mgr.set_stock_info(
+                        ticker,
+                        sector or f"_unknown_sector_{ticker}",
+                        industry or f"_unknown_industry_{ticker}",
+                    )
+                    registered += 1
+            logger.info(
+                "pre_market_correlation_registered",
+                market=market,
+                count=registered,
+            )
+        except Exception:
+            logger.exception("pre_market_correlation_register_error", market=market)
+
+    # ── Breakout History (System 1 Filter) ───────────────────
+
+    async def _update_breakout_history(self, ticker: str, bars: list) -> None:
+        """S1 돌파 이력 갱신 — System 1 필터 데이터 공급 (명세 §5.1).
+
+        실제 진입 여부와 무관하게 완성 일봉 종가 기준으로 20일 돌파를
+        기록하고, 가상 포지션의 10일 저가 청산을 일봉 단위로 추적하여
+        수익/손실(would_have_been_winner)을 판정한다.
+        """
+        if len(bars) < 22:
+            return
+
+        open_bo = await self._breakout_tracker.get_open_breakout(ticker)
+
+        if open_bo is not None:
+            # 미해결 돌파: 돌파일 이후 일봉을 순회하며 10일 저가 이탈(가상 청산) 확인
+            bo_date = (open_bo.get("breakout_date") or "")[:10]
+            for i in range(11, len(bars)):
+                bar = bars[i]
+                if bar.date <= bo_date:
+                    continue
+                lower_10 = min(b.low for b in bars[i - 10:i])
+                if bar.close < lower_10:
+                    winner = await self._breakout_tracker.evaluate_hypothetical(
+                        ticker,
+                        open_bo["breakout_price"],
+                        bar.close,
+                        lower_10,
+                    )
+                    await self._breakout_tracker.update_breakout_outcome(
+                        open_bo["id"],
+                        bool(winner),
+                        lower_10,
+                        bar.date,
+                    )
+                    break
+            # 미해결 돌파가 있는 동안에는 새 돌파를 기록하지 않는다
+            return
+
+        # 새 S1 돌파 탐지: 마지막 완성 일봉 종가 > 직전 20일 최고가
+        last = bars[-1]
+        prior_upper_20 = max(b.high for b in bars[-21:-1])
+        if last.close > prior_upper_20:
+            await self._breakout_tracker.record_breakout(
+                ticker,
+                "S1",
+                breakout_price=prior_upper_20,
+                was_entered=False,
+                breakout_date=last.date,
+            )
+
     # ── Step 3: Signals ──────────────────────────────────────
 
     async def _calculate_signals(
@@ -344,6 +439,12 @@ class PreMarketPreparer:
                 bars=len(bars),
             )
             return None
+
+        # S1 돌파 이력 갱신 (System 1 필터 — 실패해도 시그널 계산은 계속)
+        try:
+            await self._update_breakout_history(ticker, bars)
+        except Exception:
+            logger.exception("pre_market_breakout_history_error", ticker=ticker)
 
         # ATR(N) 계산
         n_value = calculate_n_from_ohlcv(bars)

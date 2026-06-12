@@ -366,6 +366,17 @@ class PositionManager:
         now = datetime.now(timezone.utc).isoformat()
         conn = self._db.conn
 
+        # UP_ONLY: 손절은 절대 내리지 않는다 (STOP_LOSS_MOVE_DIRECTION).
+        # 시그널 시점과 체결 시점 사이에 손절이 올라갔을 수 있으므로
+        # 영속 계층에서도 기존 손절과 비교해 높은 쪽을 적용한다.
+        cursor = await conn.execute(
+            "SELECT current_stop_price FROM positions WHERE id = ?",
+            (position_id,),
+        )
+        pos_row = await cursor.fetchone()
+        existing_stop = pos_row[0] if pos_row and pos_row[0] else 0.0
+        stop_price = max(stop_price, existing_stop)
+
         # Determine next unit number
         cursor = await conn.execute(
             "SELECT COUNT(*) FROM units WHERE position_id = ?",
@@ -413,6 +424,11 @@ class PositionManager:
             WHERE id = ?
             """,
             (new_total_shares, new_total_cost, new_avg_entry, stop_price, position_id),
+        )
+        # 피라미딩 시 모든 기존 유닛의 손절도 최신 손절로 동기화 (전량 단일 손절)
+        await conn.execute(
+            "UPDATE units SET current_stop_price = ? WHERE position_id = ?",
+            (stop_price, position_id),
         )
         await conn.commit()
 

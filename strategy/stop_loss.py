@@ -98,52 +98,6 @@ def check_stop_hit(current_price: float, stop_price: float) -> bool:
 
 
 # ════════════════════════════════════════════════════════════════
-# Multi-Unit Stop Schedule
-# ════════════════════════════════════════════════════════════════
-
-
-def calculate_all_unit_stops(
-    units: list[dict],
-    n_value: float,
-) -> list[dict]:
-    """Calculate stops for all pyramid units with tightening.
-
-    After each pyramid add, ALL unit stops tighten to the latest
-    entry's stop (if it is higher).  Units are processed in order.
-
-    Example with entry $100, N=$5:
-        Unit 1 @ $100.0 → stop = $100.0  - min(10, 10) = $90.0
-        Unit 2 @ $102.5 → stop = $102.5  - 10 = $92.5  → ALL get $92.5
-        Unit 3 @ $105.0 → stop = $105.0  - 10 = $95.0  → ALL get $95.0
-        Unit 4 @ $107.5 → stop = $107.5  - 10 = $97.5  → ALL get $97.5
-
-    Args:
-        units: List of dicts, each with ``"entry_price"`` and
-            ``"unit_number"`` keys.  Must be ordered by unit_number.
-        n_value: Current ATR (N) value.
-
-    Returns:
-        Copy of units list with ``"stop_price"`` added to each dict.
-    """
-    result: list[dict] = []
-    current_stop = 0.0
-
-    for unit in units:
-        entry = unit["entry_price"]
-        unit_stop = calculate_stop_price(entry, n_value)
-
-        # Stop can only move up (tighten)
-        current_stop = max(current_stop, unit_stop)
-
-        result.append({
-            **unit,
-            "stop_price": current_stop,
-        })
-
-    return result
-
-
-# ════════════════════════════════════════════════════════════════
 # Order Execution Helper
 # ════════════════════════════════════════════════════════════════
 

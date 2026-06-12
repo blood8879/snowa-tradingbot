@@ -67,6 +67,10 @@ def calculate_unit_shares(
         ``position_pct``, ``risk_amount``, ``risk_pct``.
         When skip is True, includes ``reason``.
     """
+    # Step 0: input guards (spec §4.2)
+    if n_value <= 0 or entry_price <= 0 or account_equity <= 0:
+        return {"shares": 0, "skip": True, "reason": "Invalid inputs (n/price/equity <= 0)"}
+
     # Step 1: hybrid stop distance
     stop_distance = min(STOP_LOSS_N * n_value, entry_price * STOP_LOSS_MAX_PCT)
 

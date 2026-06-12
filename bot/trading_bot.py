@@ -106,6 +106,7 @@ class TradingBot:
             rest_client=self._rest_client,
             account_mgr=self._account_mgr,
             position_mgr=self._position_mgr,
+            correlation_mgr=self._correlation_mgr,
         )
         self._post_market = PostMarketProcessor(
             db=self._db,
@@ -617,6 +618,9 @@ class TradingBot:
             # 전 세션 마감 임박/이후 stop 거부된 포지션 강제 시장가 청산
             await self._execute_forced_exits(self._intraday, "US")
 
+            # Gap-down 즉시 손절: 시가(현재가)가 손절가 아래인 포지션 (명세 §8.5)
+            await self._execute_gap_down_stops(self._intraday, "US")
+
             tickers = list(self._intraday.precomputed_signals.keys())
 
             open_positions = await self._position_mgr.get_open_positions()
@@ -897,12 +901,11 @@ class TradingBot:
                 )
 
     async def _execute_gap_down_stops(self, monitor: IntradayMonitor, market: str) -> None:
-        """Gap-down 포지션 즉시 손절.
+        """Gap-down 포지션 즉시 손절 (명세 §8.5: 시가 < 손절가 → 즉시 매도).
 
-        pre_market에서 전일 종가 < 손절가로 감지된 포지션을
-        장 시작 시 REST polling 이전에 즉시 손절 처리한다.
-        KIS Paper API가 잘못된 가격을 반환할 수 있으므로,
-        pykrx/yfinance 실제 종가 기반으로 판단한다.
+        US: 개장 직후 REST 현재가(≈시가) 기준으로 판단, 조회 실패 시 전일 종가 fallback.
+        KR: KIS Paper API가 개장 시 잘못된 가격을 반환할 수 있으므로
+            pykrx 실제 종가 기반으로 판단한다 (기존 동작 유지).
         """
         from data.price_cache import PriceCache
 
@@ -912,19 +915,45 @@ class TradingBot:
         for pos in open_positions:
             if pos.market != market:
                 continue
-            latest_close = await price_cache.get_latest_close(pos.ticker)
-            if latest_close is None:
+
+            check_price: float | None = None
+            price_basis = "latest_close"
+
+            if market == "US":
+                # 개장 직후 현재가 ≈ 시가 — 명세의 "시가 기준" 판단
+                try:
+                    exchange = await monitor._resolve_exchange(pos.ticker)
+                    price_data = await self._rest_client.get_current_price(
+                        pos.ticker, exchange, market=market,
+                    )
+                    last = float(price_data.get("last", 0) or 0)
+                    if last > 0:
+                        check_price = last
+                        price_basis = "open_proxy"
+                    await asyncio.sleep(1.0)  # KIS 초당 호출 제한(EGW00201) 회피
+                except Exception:
+                    logger.warning(
+                        "gap_down_price_fetch_failed",
+                        ticker=pos.ticker,
+                        market=market,
+                    )
+
+            if check_price is None:
+                check_price = await price_cache.get_latest_close(pos.ticker)
+            if check_price is None:
                 continue
-            if latest_close < pos.current_stop_price:
+
+            if check_price < pos.current_stop_price:
                 logger.warning(
                     "gap_down_immediate_stop",
                     ticker=pos.ticker,
-                    latest_close=latest_close,
+                    check_price=check_price,
+                    price_basis=price_basis,
                     stop_price=pos.current_stop_price,
                     market=market,
                 )
                 await monitor._execute_stop_loss(
-                    pos.ticker, latest_close, pos, time.time()
+                    pos.ticker, check_price, pos, time.time()
                 )
 
     async def _run_post_market_kr(self) -> None:
