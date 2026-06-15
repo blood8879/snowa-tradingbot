@@ -255,5 +255,9 @@ YFINANCE_RATE_LIMIT_MAX_DELAY: float = 60.0  # Max single delay cap (seconds)
 
 # ── Daily Screening Pipeline ──
 EARNINGS_CALENDAR_LOOKBACK_DAYS: int = 3     # Check last N days of earnings reports
+# yfinance의 재무제표(statement) 데이터는 실적 발표일보다 며칠~몇 주 늦게 채워진다.
+# 발표 직후(3일 윈도우)에 한 번만 fetch하면 직전 분기까지만 저장되고 신규 분기를 놓친다.
+# 발표 후 N일 이내 종목을 재fetch 대상에 포함시켜 지연분을 흡수한다.
+EARNINGS_CALENDAR_REFETCH_DAYS: int = 21     # Re-fetch reporters within N days to absorb yfinance lag
 DAILY_SCREENING_HOUR: int = 20               # KST 20:00 (2h before pre_market)
 DAILY_SCREENING_MINUTE: int = 0
