@@ -321,44 +321,82 @@ class AccountManager:
         fixed_broker_only = 0
         fixed_qty_mismatch = 0
 
+        # db_only가 있으면 당일 브로커 체결내역에서 실제 매도 체결가를 복원한다.
+        # 수동 매도(봇 orders 미기록)도 계좌 체결내역엔 남으므로, 손절가로
+        # 추정하지 않고 실제 청산가로 정확히 realized_pnl을 계산할 수 있다.
+        broker_sell_fills: dict[str, dict[str, float]] = {}
+        if db_only:
+            try:
+                fills = await self._rest.get_filled_orders(market=market)
+                for f in fills:
+                    if str(f.get("sll_buy_dvsn_cd", "")) not in ("01", "1"):  # 01 = 매도
+                        continue
+                    tk = (f.get("pdno") or "").upper()
+                    qty = int(float(f.get("ft_ccld_qty") or f.get("tot_ccld_qty") or 0))
+                    price = float(f.get("ft_ccld_unpr3") or 0)
+                    if not tk or qty <= 0 or price <= 0:
+                        continue
+                    agg = broker_sell_fills.setdefault(tk, {"qty": 0.0, "amount": 0.0})
+                    agg["qty"] += qty
+                    agg["amount"] += price * qty
+            except Exception:
+                logger.warning("sync_filled_orders_query_failed", market=market, exc_info=True)
+
         # ── db_only: DB에만 있고 브로커에 없음 → CLOSED 처리 ──
         for ticker in db_only:
             pos_info = db_map[ticker]
             total_cost = pos_info.get("total_cost", 0) or 0
             total_shares = pos_info.get("shares", 0) or 0
 
-            # 체결가 추정: 마지막 SELL 주문의 체결가 → 없으면 손절가 → 없으면 None
+            # 청산가 결정 우선순위:
+            #   1) 브로커 체결내역의 실제 매도가 (수동매도 포함, 가장 정확)
+            #   2) 봇이 낸 SELL 주문 체결가
+            #   3) 손절가 추정 (최후 fallback)
             exit_price = None
             realized_pnl = None
-            sell_cursor = await self._db.conn.execute(
-                """SELECT filled_price FROM orders
-                   WHERE ticker = ? AND side = 'SELL' AND status = 'FILLED'
-                         AND filled_price > 0
-                   ORDER BY filled_at DESC LIMIT 1""",
-                (ticker,),
-            )
-            sell_row = await sell_cursor.fetchone()
-            if sell_row and sell_row[0]:
-                exit_price = sell_row[0]
+            pnl_source = None
+
+            agg = broker_sell_fills.get(ticker.upper())
+            if agg and agg["qty"] > 0:
+                exit_price = agg["amount"] / agg["qty"]
+                pnl_source = "broker_fill"
             else:
-                # 손절가를 exit_price 추정치로 사용
-                stop_cursor = await self._db.conn.execute(
-                    "SELECT current_stop_price FROM positions WHERE id = ?",
-                    (pos_info["id"],),
+                sell_cursor = await self._db.conn.execute(
+                    """SELECT filled_price FROM orders
+                       WHERE ticker = ? AND side = 'SELL' AND status = 'FILLED'
+                             AND filled_price > 0
+                       ORDER BY filled_at DESC LIMIT 1""",
+                    (ticker,),
                 )
-                stop_row = await stop_cursor.fetchone()
-                if stop_row and stop_row[0]:
-                    exit_price = stop_row[0]
+                sell_row = await sell_cursor.fetchone()
+                if sell_row and sell_row[0]:
+                    exit_price = sell_row[0]
+                    pnl_source = "bot_order"
+                else:
+                    stop_cursor = await self._db.conn.execute(
+                        "SELECT current_stop_price FROM positions WHERE id = ?",
+                        (pos_info["id"],),
+                    )
+                    stop_row = await stop_cursor.fetchone()
+                    if stop_row and stop_row[0]:
+                        exit_price = stop_row[0]
+                        pnl_source = "stop_estimate"
 
             if exit_price and total_shares > 0 and total_cost > 0:
                 realized_pnl = (exit_price * total_shares) - total_cost
 
+            close_reason = {
+                "broker_fill": "sync_filled_actual",
+                "bot_order": "sync_order_filled",
+                "stop_estimate": "sync_stop_estimated",
+            }.get(pnl_source or "", "sync_broker_missing")
+
             await self._db.conn.execute(
                 """UPDATE positions
-                   SET status = 'CLOSED', closed_at = ?, close_reason = 'sync_broker_missing',
+                   SET status = 'CLOSED', closed_at = ?, close_reason = ?,
                        realized_pnl = ?
                    WHERE id = ?""",
-                (now_str, realized_pnl, pos_info["id"]),
+                (now_str, close_reason, realized_pnl, pos_info["id"]),
             )
             fixed_db_only += 1
             logger.warning(
@@ -367,7 +405,8 @@ class AccountManager:
                 position_id=pos_info["id"],
                 exit_price=exit_price,
                 realized_pnl=realized_pnl,
-                msg="브로커에 없는 포지션 → CLOSED 처리 (PnL 계산 포함)",
+                pnl_source=pnl_source,
+                msg="브로커에 없는 포지션 → CLOSED 처리 (실제 체결가 우선)",
             )
 
         # ── broker_only: 브로커에만 있고 DB에 없음 → OPEN 생성 ──
