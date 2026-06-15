@@ -124,6 +124,10 @@ class IntradayMonitor:
         self._global_entry_block_until: float = 0.0
         self._GLOBAL_ENTRY_BLOCK_SEC: float = 300.0
 
+        # 자동매매 on/off 게이트. 대시보드 스위치(bot_state)를 TradingBot
+        # 폴링이 주입한다. False면 on_price_update가 매매 액션을 건너뛴다.
+        self._trading_enabled: bool = True
+
     def set_market(self, market: str) -> None:
         """Set the market for this monitor (US or KR)."""
         self._market = market
@@ -332,6 +336,11 @@ class IntradayMonitor:
 
         # signals 없고 포지션도 없으면 무시 (워치리스트 외 종목)
         if signals is None and position is None:
+            return
+
+        # 자동매매 스위치 OFF → 매매 액션(손절/피라미딩/진입/청산) 일절 중단.
+        # 가격 추적/하트비트는 유지. 스위치를 다시 켜면 sync 후 재개된다(TradingBot 폴링).
+        if not self._trading_enabled:
             return
 
         # ── Priority 1: 손절 체크 (signals 불필요) ──
@@ -1057,6 +1066,9 @@ class IntradayMonitor:
 
         pre_market 직후 호출. 전 세션 마감 임박/이후 손절 거부 건 회수용.
         """
+        if not self._trading_enabled:
+            logger.info("forced_exit_skipped_trading_disabled", market=self._market)
+            return
         ticker = position.ticker  # type: ignore[attr-defined]
         if await self._db.has_submitted_order(ticker, "SELL"):
             logger.debug("forced_exit_skipped_pending_order", ticker=ticker)
