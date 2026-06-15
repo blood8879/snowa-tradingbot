@@ -18,6 +18,7 @@ from zoneinfo import ZoneInfo
 import structlog
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 
 from bot.daily_screening import DailyScreeningPipeline
 from bot.intraday_monitor import IntradayMonitor
@@ -167,6 +168,43 @@ class TradingBot:
             return market_id == "US"
         return value.lower() in ("true", "1", "yes")
 
+    async def _poll_market_switches(self) -> None:
+        """대시보드 자동매매 스위치(bot_state) 변화를 감지해 게이트를 갱신한다.
+
+        - ON 상태  → IntradayMonitor._trading_enabled = True (매매 허용)
+        - OFF 상태 → False (손절/피라미딩/진입/청산 일절 중단)
+        - OFF→ON 전환 시 sync_positions로 수동 매매분을 정합한 뒤 재개한다.
+
+        매매를 실행하는 봇 프로세스 안에서 돌아야 하므로(브로커 인증 필요)
+        토글 API가 아니라 여기서 폴링한다.
+        """
+        targets = (
+            ("US", self._intraday, "_prev_us_enabled"),
+            ("KR", self._intraday_kr, "_prev_kr_enabled"),
+        )
+        for market_id, monitor, prev_attr in targets:
+            try:
+                enabled = await self.is_market_enabled(market_id)
+            except Exception:
+                continue
+
+            prev = getattr(self, prev_attr, enabled)
+            monitor._trading_enabled = enabled
+
+            if enabled and prev is False:
+                # OFF→ON: 재개 전 브로커와 포지션 정합 (수동 매도/매수 반영)
+                try:
+                    sync_result = await self._account_mgr.sync_positions(market=market_id)
+                    logger.info("trading_switch_resumed", market=market_id, **sync_result)
+                except Exception as exc:
+                    logger.warning(
+                        "trading_switch_resume_sync_failed", market=market_id, error=str(exc)
+                    )
+            elif not enabled and prev is True:
+                logger.info("trading_switch_paused", market=market_id)
+
+            setattr(self, prev_attr, enabled)
+
     # ────────────────────────────────────────────────────────
     # Main Entry Point
     # ────────────────────────────────────────────────────────
@@ -207,6 +245,17 @@ class TradingBot:
 
         # Step 2.6: 최초 실행 시 시작 잔고 기록
         await self._record_starting_equity()
+
+        # Step 2.7: 자동매매 스위치(대시보드) 초기 상태를 게이트에 반영
+        self._prev_us_enabled = await self.is_market_enabled("US")
+        self._prev_kr_enabled = await self.is_market_enabled("KR")
+        self._intraday._trading_enabled = self._prev_us_enabled
+        self._intraday_kr._trading_enabled = self._prev_kr_enabled
+        logger.info(
+            "trading_switch_initialized",
+            us=self._prev_us_enabled,
+            kr=self._prev_kr_enabled,
+        )
 
         # Step 3: 봇 상태 DB 기록
         now_iso = datetime.now(timezone.utc).isoformat()
@@ -260,6 +309,16 @@ class TradingBot:
 
         월~금만 실행 (day_of_week="mon-fri").
         """
+        # === 자동매매 스위치 폴링 (대시보드 on/off 즉시 반영) ===
+        self._scheduler.add_job(
+            self._poll_market_switches,
+            trigger=IntervalTrigger(seconds=10),
+            id="poll_market_switches",
+            name="Poll trading on/off switches",
+            max_instances=1,
+            replace_existing=True,
+        )
+
         # === US Market Schedule ===
         # 매일 스크리닝: KST 20:00 (pre_market 2시간 전)
         self._scheduler.add_job(
