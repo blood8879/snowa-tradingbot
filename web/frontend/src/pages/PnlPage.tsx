@@ -434,15 +434,25 @@ export function PnlPage() {
           <p className={`text-xl sm:text-2xl font-bold mb-1 tabular-nums break-all ${lastCum.cumPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
             {fmtPnl(lastCum.cumPnl, market)}
           </p>
-          <p className="text-xs text-slate-500 mb-2">자산 변동 기준 · 입금/출금 포함</p>
-          {data?.summary?.realized_pnl != null && (
-            <div className="mb-4 flex flex-wrap items-baseline gap-x-2 gap-y-1">
-              <span className="text-sm text-slate-400">실현 매매손익 (입금 제외)</span>
-              <span className={`text-base font-semibold tabular-nums ${data.summary.realized_pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                {fmtPnl(data.summary.realized_pnl, market)}
-              </span>
-            </div>
-          )}
+          <p className="text-xs text-slate-500 mb-2">자산 변동 기준 · 원금/입금/출금 포함</p>
+          {data?.summary?.realized_pnl != null && (() => {
+            const realized = data.summary.realized_pnl ?? 0;
+            const unrealized = holdingsPnl?.pnl ?? 0;
+            const net = realized + unrealized;
+            return (
+              <div className="mb-4">
+                <div className="flex flex-wrap items-baseline gap-x-2">
+                  <span className="text-sm text-slate-400">순 매매손익 (원금·입금 제외)</span>
+                  <span className={`text-lg font-bold tabular-nums ${net >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                    {fmtPnl(net, market)}
+                  </span>
+                </div>
+                <p className="text-xs text-slate-500">
+                  실현 {fmtPnl(realized, market)} + 평가(미실현) {fmtPnl(unrealized, market)}
+                </p>
+              </div>
+            );
+          })()}
           <div className="bg-panel rounded-xl p-3 sm:p-4 border border-slate-700/50">
             <ResponsiveContainer width="100%" height={256}>
               <LineChart data={cumulativeData}>
