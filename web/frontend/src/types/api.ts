@@ -294,6 +294,8 @@ export interface PnlDataPoint {
   entries: number;
   exits: number;
   stop_losses: number;
+  realized_cum?: number | null;
+  unrealized?: number | null;
 }
 
 export interface PnlResponse {
@@ -302,6 +304,8 @@ export interface PnlResponse {
   summary: {
     total_pnl: number;
     realized_pnl?: number;
+    unrealized_pnl?: number | null;
+    net_pnl?: number | null;
     max_equity: number;
     max_drawdown_pct: number;
     data_points: number;

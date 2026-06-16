@@ -93,7 +93,8 @@ async def get_pnl(
                 max_drawdown_pct,
                 entries_count AS entries,
                 exits_count AS exits,
-                stop_losses_count AS stop_losses
+                stop_losses_count AS stop_losses,
+                cash_balance AS cash
             FROM daily_log
             WHERE market = ?
             ORDER BY date ASC
@@ -114,6 +115,7 @@ async def get_pnl(
             "entries": r[6],
             "exits": r[7],
             "stop_losses": r[8],
+            "cash": r[9] if len(r) > 9 else None,
         }
         for r in rows
     ]
@@ -141,6 +143,55 @@ async def get_pnl(
         except Exception as exc:
             logger.warning("pnl_live_equity_failed", error=str(exc))
 
+    # ── 실현/미실현 손익 시계열 (daily, 원금·입금 무관) ──
+    # realized_cum: 청산일까지 누적 실현손익
+    # unrealized: 그날 평가액(account_equity - cash) - 보유 units 매입원가
+    if period == "daily" and data_points:
+        ucur = await db.conn.execute(
+            "SELECT u.shares, u.entry_price, u.entered_at, p.opened_at, p.closed_at "
+            "FROM units u JOIN positions p ON p.id = u.position_id WHERE p.market = ?",
+            (market,),
+        )
+        urows = await ucur.fetchall()
+        ccur = await db.conn.execute(
+            "SELECT realized_pnl, closed_at FROM positions "
+            "WHERE status = 'CLOSED' AND market = ? AND realized_pnl IS NOT NULL",
+            (market,),
+        )
+        crows = await ccur.fetchall()
+
+        for dp in data_points:
+            d = (dp.get("period") or "")[:10]
+            cost_basis = sum(
+                (u[0] or 0) * (u[1] or 0)
+                for u in urows
+                if (u[2] or "")[:10] <= d
+                and (u[3] or "")[:10] <= d
+                and (u[4] is None or (u[4] or "")[:10] > d)
+            )
+            dp["realized_cum"] = round(
+                sum((c[0] or 0) for c in crows if (c[1] or "")[:10] <= d), 2
+            )
+            cash = dp.get("cash")
+            if cash is not None and dp.get("equity") is not None:
+                dp["unrealized"] = round((dp["equity"] - cash) - cost_basis, 2)
+            else:
+                dp["unrealized"] = None
+
+        # 마지막(오늘) 점은 실시간 평가액/실현으로 보정
+        if account_mgr is not None:
+            try:
+                info = await account_mgr.get_account_info(market=market)
+                ocur = await db.conn.execute(
+                    "SELECT COALESCE(SUM(total_cost), 0) FROM positions WHERE status='OPEN' AND market=?",
+                    (market,),
+                )
+                open_cost = (await ocur.fetchone())[0] or 0.0
+                data_points[-1]["unrealized"] = round((info.total_positions_value or 0.0) - open_cost, 2)
+                data_points[-1]["realized_cum"] = round(sum((c[0] or 0) for c in crows), 2)
+            except Exception:
+                pass
+
     # Summary stats
     total_pnl = sum(d["pnl"] or 0.0 for d in data_points)
     max_equity = max((d["equity"] or 0.0 for d in data_points), default=0.0)
@@ -155,6 +206,11 @@ async def get_pnl(
     )
     realized_pnl_total = (await rcur.fetchone())[0] or 0.0
 
+    last_unrealized = None
+    if period == "daily" and data_points:
+        last_unrealized = data_points[-1].get("unrealized")
+    net_pnl = (realized_pnl_total + last_unrealized) if last_unrealized is not None else None
+
     return {
         "period": period,
         "market": market,
@@ -162,6 +218,8 @@ async def get_pnl(
         "summary": {
             "total_pnl": total_pnl,
             "realized_pnl": realized_pnl_total,
+            "unrealized_pnl": last_unrealized,
+            "net_pnl": net_pnl,
             "max_equity": max_equity,
             "max_drawdown_pct": max_drawdown,
             "data_points": len(data_points),

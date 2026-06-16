@@ -5,6 +5,7 @@ import {
   XAxis,
   YAxis,
   Tooltip,
+  Legend,
   ResponsiveContainer,
 } from 'recharts';
 import { usePnl } from '@/hooks/usePnl';
@@ -143,20 +144,24 @@ function getAvailableYears(points: PnlDataPoint[]): number[] {
 
 interface CumulativePoint {
   date: string;
-  cumPnl: number;
+  realized: number | null;
+  unrealized: number | null;
+  net: number | null;
 }
 
 function buildCumulativeData(points: PnlDataPoint[]): CumulativePoint[] {
   const sorted = [...points].sort(
     (a, b) => new Date(a.period).getTime() - new Date(b.period).getTime(),
   );
-  let cum = 0;
   return sorted.map((p) => {
-    cum += p.pnl;
     const parts = p.period.split('-');
+    const r = p.realized_cum ?? null;
+    const u = p.unrealized ?? null;
     return {
       date: `${parts[1]}-${parts[2]}`,
-      cumPnl: Math.round(cum * 100) / 100,
+      realized: r,
+      unrealized: u,
+      net: r != null && u != null ? Math.round((r + u) * 100) / 100 : null,
     };
   });
 }
@@ -431,26 +436,24 @@ export function PnlPage() {
               ? [...points].sort((a, b) => new Date(b.period).getTime() - new Date(a.period).getTime())[0].period
               : ''}
           </p>
-          <p className={`text-xl sm:text-2xl font-bold mb-1 tabular-nums break-all ${lastCum.cumPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-            {fmtPnl(lastCum.cumPnl, market)}
-          </p>
-          <p className="text-xs text-slate-500 mb-2">자산 변동 기준 · 원금/입금/출금 포함</p>
-          {data?.summary?.realized_pnl != null && (() => {
-            const realized = data.summary.realized_pnl ?? 0;
-            const unrealized = holdingsPnl?.pnl ?? 0;
-            const net = realized + unrealized;
+          {(() => {
+            const net = data?.summary?.net_pnl ?? lastCum.net ?? 0;
+            const realized = data?.summary?.realized_pnl ?? 0;
+            const unrealized = data?.summary?.unrealized_pnl ?? (holdingsPnl?.pnl ?? 0);
+            const assetChange = data?.summary?.total_pnl ?? 0;
             return (
-              <div className="mb-4">
-                <div className="flex flex-wrap items-baseline gap-x-2">
-                  <span className="text-sm text-slate-400">순 매매손익 (원금·입금 제외)</span>
-                  <span className={`text-lg font-bold tabular-nums ${net >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                    {fmtPnl(net, market)}
-                  </span>
-                </div>
-                <p className="text-xs text-slate-500">
-                  실현 {fmtPnl(realized, market)} + 평가(미실현) {fmtPnl(unrealized, market)}
+              <>
+                <p className={`text-xl sm:text-2xl font-bold mb-0.5 tabular-nums break-all ${net >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                  {fmtPnl(net, market)}
                 </p>
-              </div>
+                <p className="text-xs text-slate-500 mb-1">순 매매손익 · 원금/입금 제외</p>
+                <p className="text-xs text-slate-500 mb-3">
+                  <span className="text-amber-400/90">실현 {fmtPnl(realized, market)}</span>
+                  {' + '}
+                  <span className="text-emerald-400/90">평가 {fmtPnl(unrealized, market)}</span>
+                  <span className="text-slate-600"> · 자산변동(입금 포함) {fmtPnl(assetChange, market)}</span>
+                </p>
+              </>
             );
           })()}
           <div className="bg-panel rounded-xl p-3 sm:p-4 border border-slate-700/50">
@@ -460,15 +463,14 @@ export function PnlPage() {
                 <YAxis tick={{ fontSize: 11, fill: '#94a3b8' }} axisLine={{ stroke: '#334155' }} tickLine={false} />
                 <Tooltip
                   contentStyle={{ backgroundColor: '#1e293b', border: '1px solid #334155', borderRadius: '8px' }}
-                  formatter={(value: number | undefined) => {
-                    const v = value ?? 0;
-                    return [
-                      fmtPnl(v, market),
-                      '누적 손익',
-                    ];
-                  }}
+                  formatter={(value: number | undefined, name) => [
+                    fmtPnl(value ?? 0, market),
+                    name === 'realized' ? '실현손익' : '평가손익',
+                  ]}
                 />
-                <Line type="monotone" dataKey="cumPnl" stroke="#f59e0b" strokeWidth={2} dot={false} />
+                <Legend formatter={(v) => (v === 'realized' ? '실현손익' : '평가손익')} wrapperStyle={{ fontSize: 12 }} />
+                <Line type="monotone" dataKey="realized" stroke="#f59e0b" strokeWidth={2} dot={false} name="realized" connectNulls />
+                <Line type="monotone" dataKey="unrealized" stroke="#10b981" strokeWidth={2} dot={false} name="unrealized" connectNulls />
               </LineChart>
             </ResponsiveContainer>
           </div>
