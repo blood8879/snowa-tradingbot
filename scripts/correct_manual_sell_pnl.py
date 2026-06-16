@@ -48,9 +48,9 @@ async def main() -> None:
     db = Database(str(s.db_full_path))
     await db.initialize()
 
-    auth = KISAuth(s)
+    auth = KISAuth()
     await auth.refresh_access_token()  # REST 토큰만 — WS approval 미발급(충돌 방지)
-    rest = KISRestClient(s, auth, db)
+    rest = KISRestClient(auth)
 
     end = datetime.now().strftime("%Y%m%d")
     start = (datetime.now() - timedelta(days=days)).strftime("%Y%m%d")
