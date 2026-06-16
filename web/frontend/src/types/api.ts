@@ -301,6 +301,7 @@ export interface PnlResponse {
   data: PnlDataPoint[];
   summary: {
     total_pnl: number;
+    realized_pnl?: number;
     max_equity: number;
     max_drawdown_pct: number;
     data_points: number;

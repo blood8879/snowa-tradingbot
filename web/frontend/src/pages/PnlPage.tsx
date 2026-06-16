@@ -431,9 +431,18 @@ export function PnlPage() {
               ? [...points].sort((a, b) => new Date(b.period).getTime() - new Date(a.period).getTime())[0].period
               : ''}
           </p>
-          <p className={`text-xl sm:text-2xl font-bold mb-4 tabular-nums break-all ${lastCum.cumPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+          <p className={`text-xl sm:text-2xl font-bold mb-1 tabular-nums break-all ${lastCum.cumPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
             {fmtPnl(lastCum.cumPnl, market)}
           </p>
+          <p className="text-xs text-slate-500 mb-2">자산 변동 기준 · 입금/출금 포함</p>
+          {data?.summary?.realized_pnl != null && (
+            <div className="mb-4 flex flex-wrap items-baseline gap-x-2 gap-y-1">
+              <span className="text-sm text-slate-400">실현 매매손익 (입금 제외)</span>
+              <span className={`text-base font-semibold tabular-nums ${data.summary.realized_pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                {fmtPnl(data.summary.realized_pnl, market)}
+              </span>
+            </div>
+          )}
           <div className="bg-panel rounded-xl p-3 sm:p-4 border border-slate-700/50">
             <ResponsiveContainer width="100%" height={256}>
               <LineChart data={cumulativeData}>

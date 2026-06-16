@@ -146,12 +146,22 @@ async def get_pnl(
     max_equity = max((d["equity"] or 0.0 for d in data_points), default=0.0)
     max_drawdown = max((d["max_drawdown_pct"] or 0.0 for d in data_points), default=0.0)
 
+    # 순수 실현 매매손익 — 청산된 포지션의 realized_pnl 합.
+    # total_pnl(=일별 equity 변화 누적)은 입금/출금이 섞이지만, 이 값은
+    # 매매로만 발생한 손익이라 입금과 무관하다.
+    rcur = await db.conn.execute(
+        "SELECT COALESCE(SUM(realized_pnl), 0) FROM positions WHERE status = 'CLOSED' AND market = ?",
+        (market,),
+    )
+    realized_pnl_total = (await rcur.fetchone())[0] or 0.0
+
     return {
         "period": period,
         "market": market,
         "data": data_points,
         "summary": {
             "total_pnl": total_pnl,
+            "realized_pnl": realized_pnl_total,
             "max_equity": max_equity,
             "max_drawdown_pct": max_drawdown,
             "data_points": len(data_points),
