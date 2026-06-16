@@ -45,10 +45,16 @@ async def compute_market_filter(market: str = "US") -> dict:
         if now - cached_at < _CACHE_TTL:
             return cached_result
 
-    if market == "KR":
-        result = await asyncio.to_thread(_fetch_kr_filter)
-    else:
-        result = await asyncio.to_thread(_fetch_spy_filter)
+    # 봇이 매일 갱신하는 daily_prices(DB)에서 벤치마크를 우선 계산한다.
+    # 대시보드 프로세스의 yfinance 직접 조회는 rate-limit로 자주 실패해
+    # close/sma200/roc가 None이 되고, regime이 사유 없이 YELLOW로만 표시된다.
+    # DB가 부족할 때만 yfinance/pykrx로 폴백한다.
+    result = await _fetch_benchmark_from_db(market)
+    if result is None:
+        if market == "KR":
+            result = await asyncio.to_thread(_fetch_kr_filter)
+        else:
+            result = await asyncio.to_thread(_fetch_spy_filter)
 
     # Add breadth from DB
     try:
@@ -77,6 +83,48 @@ async def compute_market_filter(market: str = "US") -> dict:
 
     _cache[market] = (now, result)
     return result
+
+
+async def _fetch_benchmark_from_db(market: str = "US") -> dict | None:
+    """Compute the benchmark filter from daily_prices the bot already maintains.
+
+    Returns None when the DB lacks enough history (caller falls back to a live
+    provider).
+    """
+    ticker = "069500" if market == "KR" else "SPY"
+    name = "KODEX200" if market == "KR" else "SPY"
+    try:
+        from core.database import Database
+
+        db = Database("data/snowa.db")
+        await db.initialize()
+        cur = await db.conn.execute(
+            "SELECT close FROM daily_prices WHERE ticker = ? ORDER BY date ASC",
+            (ticker,),
+        )
+        closes = [float(r[0]) for r in await cur.fetchall() if r[0] is not None]
+        await db.close()
+    except Exception:
+        return None
+
+    if len(closes) < 200:
+        return None
+
+    close = closes[-1]
+    sma200 = sum(closes[-200:]) / 200
+    roc = None
+    if len(closes) > MARKET_ROC_PERIOD:
+        old = closes[-(MARKET_ROC_PERIOD + 1)]
+        if old > 0:
+            roc = (closes[-1] / old) - 1.0
+
+    return {
+        "benchmark": name,
+        "close": round(close, 2),
+        "sma200": round(sma200, 2),
+        "filter_pass": close > sma200,
+        "roc": roc,
+    }
 
 
 def _fetch_spy_filter() -> dict:
