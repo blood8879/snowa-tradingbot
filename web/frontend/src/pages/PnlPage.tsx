@@ -206,9 +206,29 @@ export function PnlPage() {
     return { pnl: pnlSum, pct, evalSum, costSum, count };
   }, [positionsData]);
 
-  const dayMap = useMemo(() => buildDayPnlMap(points, calYear, calMonth), [points, calYear, calMonth]);
-  const monthMap = useMemo(() => buildMonthPnlMap(points, calYear), [points, calYear]);
-  const yearMap = useMemo(() => buildYearPnlMap(points), [points]);
+  // 순 매매손익(실현+평가)의 일별 변화 — 입금/출금 무관.
+  // 캘린더/월·연 집계가 daily_pnl(=equity 변화) 대신 이 값을 쓰면 입금일이 섞이지 않는다.
+  const netPoints = useMemo(() => {
+    const sorted = [...points].sort(
+      (a, b) => new Date(a.period).getTime() - new Date(b.period).getTime(),
+    );
+    let prevNet: number | null = null;
+    return sorted.map((p) => {
+      const r = p.realized_cum;
+      const u = p.unrealized;
+      const net = r != null && u != null ? r + u : null;
+      let daily = 0;
+      if (net != null) {
+        daily = prevNet != null ? net - prevNet : net;
+        prevNet = net;
+      }
+      return { ...p, pnl: Math.round(daily * 100) / 100 };
+    });
+  }, [points]);
+
+  const dayMap = useMemo(() => buildDayPnlMap(netPoints, calYear, calMonth), [netPoints, calYear, calMonth]);
+  const monthMap = useMemo(() => buildMonthPnlMap(netPoints, calYear), [netPoints, calYear]);
+  const yearMap = useMemo(() => buildYearPnlMap(netPoints), [netPoints]);
   const availableYears = useMemo(() => getAvailableYears(points), [points]);
   const cumulativeData = useMemo(() => buildCumulativeData(points), [points]);
   const lastCum = cumulativeData.length > 0 ? cumulativeData[cumulativeData.length - 1] : null;
