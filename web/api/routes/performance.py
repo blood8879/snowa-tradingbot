@@ -20,6 +20,79 @@ logger = structlog.get_logger(__name__)
 router = APIRouter(tags=["performance"])
 
 
+async def compute_net_pnl_series(
+    db: Database,
+    market: str,
+    account_mgr: AccountManager | None = None,
+) -> list[dict]:
+    """날짜별 순 매매손익 시계열 — 입금/출금 무관.
+
+    각 거래일 d에 대해:
+      realized_cum = 청산일까지 누적 실현손익
+      unrealized   = (account_equity - cash) - 보유 units 매입원가
+      net          = realized_cum + unrealized
+    account_mgr가 주어지면 마지막(현재) 점을 실시간 브로커 값으로 보정한다.
+    """
+    dcur = await db.conn.execute(
+        "SELECT date, account_equity, cash_balance FROM daily_log WHERE market = ? ORDER BY date ASC",
+        (market,),
+    )
+    drows = await dcur.fetchall()
+    if not drows:
+        return []
+
+    ucur = await db.conn.execute(
+        "SELECT u.shares, u.entry_price, u.entered_at, p.opened_at, p.closed_at "
+        "FROM units u JOIN positions p ON p.id = u.position_id WHERE p.market = ?",
+        (market,),
+    )
+    urows = await ucur.fetchall()
+    ccur = await db.conn.execute(
+        "SELECT realized_pnl, closed_at FROM positions "
+        "WHERE status = 'CLOSED' AND market = ? AND realized_pnl IS NOT NULL",
+        (market,),
+    )
+    crows = await ccur.fetchall()
+
+    series: list[dict] = []
+    for date, equity, cash in drows:
+        d = (date or "")[:10]
+        cost_basis = sum(
+            (u[0] or 0) * (u[1] or 0)
+            for u in urows
+            if (u[2] or "")[:10] <= d
+            and (u[3] or "")[:10] <= d
+            and (u[4] is None or (u[4] or "")[:10] > d)
+        )
+        realized_cum = sum((c[0] or 0) for c in crows if (c[1] or "")[:10] <= d)
+        unrealized = (equity - cash) - cost_basis if (equity is not None and cash is not None) else None
+        net = (realized_cum + unrealized) if unrealized is not None else None
+        series.append({
+            "date": d,
+            "realized_cum": round(realized_cum, 2),
+            "unrealized": round(unrealized, 2) if unrealized is not None else None,
+            "net": round(net, 2) if net is not None else None,
+        })
+
+    if account_mgr is not None and series:
+        try:
+            info = await account_mgr.get_account_info(market=market)
+            ocur = await db.conn.execute(
+                "SELECT COALESCE(SUM(total_cost), 0) FROM positions WHERE status='OPEN' AND market=?",
+                (market,),
+            )
+            open_cost = (await ocur.fetchone())[0] or 0.0
+            unreal = (info.total_positions_value or 0.0) - open_cost
+            realized_cum = sum((c[0] or 0) for c in crows)
+            series[-1]["unrealized"] = round(unreal, 2)
+            series[-1]["realized_cum"] = round(realized_cum, 2)
+            series[-1]["net"] = round(realized_cum + unreal, 2)
+        except Exception:
+            pass
+
+    return series
+
+
 @router.get("/pnl", dependencies=[Depends(verify_api_key)])
 async def get_pnl(
     period: str = Query(

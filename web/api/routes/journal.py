@@ -383,6 +383,28 @@ async def get_journal(
         except Exception as exc:
             logger.warning("journal_live_equity_failed", error=str(exc))
 
+    # 월간 손익을 순 매매손익(실현 + 미실현 변화)으로 재계산 — 입금/출금 무관.
+    # net[월말] - net[월초 직전]. (min/max equity는 자산 기준이라 그대로 둔다.)
+    if market and market != "ALL":
+        try:
+            from web.api.routes.performance import compute_net_pnl_series
+
+            series = await compute_net_pnl_series(
+                db, market, account_mgr if is_single_current_month else None
+            )
+            end_net = start_net = None
+            for s in series:
+                if s["net"] is None:
+                    continue
+                if s["date"][:7] <= resolved_end:
+                    end_net = s["net"]
+                if s["date"][:7] < resolved_start:
+                    start_net = s["net"]
+            if end_net is not None:
+                monthly_pnl = end_net - (start_net or 0.0)
+        except Exception as exc:
+            logger.warning("journal_net_pnl_failed", error=str(exc))
+
     return {
         "month": month,
         "start_month": resolved_start,
