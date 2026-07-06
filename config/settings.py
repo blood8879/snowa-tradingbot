@@ -67,6 +67,10 @@ class Settings(BaseSettings):
     openai_admin_api_key: str = ""
     anthropic_api_key: str = ""
 
+    # ── VCP Entry Filter ─────────────────────────────────────
+    # off: 평가/차단 없음 | shadow: 평가+로깅만(진입 허용) | enforce: 미충족 시 진입 차단
+    vcp_filter_mode: str = "shadow"
+
     # ── Screening Data Refresh ───────────────────────────────
     screening_max_stale_fundamental_targets: int = 500
     screening_max_kr_dart_prefetch_targets: int = 150

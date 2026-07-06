@@ -253,6 +253,16 @@ YFINANCE_RATE_LIMIT_BASE_DELAY: float = 5.0  # Initial backoff delay (seconds)
 YFINANCE_RATE_LIMIT_BACKOFF_MULT: float = 2.0  # Exponential multiplier
 YFINANCE_RATE_LIMIT_MAX_DELAY: float = 60.0  # Max single delay cap (seconds)
 
+# ── VCP (Volatility Contraction Pattern) Entry Filter ──
+# 돌파 직전 베이스가 "수축형"인지 판정. 세그먼트별 고저 깊이가 순차 수축해야 함.
+# 초기값은 실워치리스트 sanity check로 보정한 shadow-phase 시작점 —
+# 섀도 데이터(차단됐을 돌파들의 실제 결과)를 보고 조이거나 푼다.
+VCP_BASE_LEN: int = 50               # Base window (trading days)
+VCP_NUM_SEGMENTS: int = 3            # Successive contraction segments
+VCP_MAX_FINAL_DEPTH: float = 0.15    # Final segment depth ≤ 15% (pivot tightness)
+VCP_CONTRACTION_RATIO: float = 1.0   # Depths must be non-expanding (monotone)
+# 거래량 dry-up은 기록만 하고 판정에는 쓰지 않는다 (돌파 거래량은 S필터 담당)
+
 # ── Daily Screening Pipeline ──
 EARNINGS_CALENDAR_LOOKBACK_DAYS: int = 3     # Check last N days of earnings reports
 # yfinance의 재무제표(statement) 데이터는 실적 발표일보다 며칠~몇 주 늦게 채워진다.

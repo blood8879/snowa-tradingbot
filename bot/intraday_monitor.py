@@ -128,6 +128,9 @@ class IntradayMonitor:
         # 폴링이 주입한다. False면 on_price_update가 매매 액션을 건너뛴다.
         self._trading_enabled: bool = True
 
+        # VCP 게이트 로그 중복 방지 (종목당 1회 — 틱마다 스팸 방지)
+        self._vcp_logged: set[str] = set()
+
     def set_market(self, market: str) -> None:
         """Set the market for this monitor (US or KR)."""
         self._market = market
@@ -273,6 +276,7 @@ class IntradayMonitor:
     async def start(self) -> None:
         self._load_stock_names()
         self._running = True
+        self._vcp_logged.clear()  # 세션마다 VCP 게이트 로그 1회씩 다시 허용
         logger.info(
             "intraday_monitor_started",
             watchlist_count=len(self.precomputed_signals),
@@ -724,6 +728,10 @@ class IntradayMonitor:
             logger.debug("entry_skipped_pending_order", ticker=ticker)
             return
 
+        if not self._vcp_filter_allows_entry(ticker, signals):
+            self._entry_cooldown[ticker] = time.monotonic()
+            return
+
         if not await self._ai_report_gate_allows_entry(ticker):
             self._entry_cooldown[ticker] = time.monotonic()
             return
@@ -938,6 +946,40 @@ class IntradayMonitor:
             n_value=signals.n_value,
         )
         await self._event_bus.emit(signal)
+
+    def _vcp_filter_allows_entry(self, ticker: str, signals: PrecomputedSignals) -> bool:
+        """VCP 진입 필터.
+
+        - off(또는 알 수 없는 값): 항상 허용
+        - vcp_pass=None(미평가/에러): 허용 — 기존 동작으로 폴백
+        - shadow: 미충족이면 로그만 남기고 허용 (관찰용)
+        - enforce: 미충족이면 진입 차단
+        """
+        mode = (get_settings().vcp_filter_mode or "off").lower()
+        if mode not in ("shadow", "enforce"):
+            return True
+
+        vcp_pass = getattr(signals, "vcp_pass", None)
+        if vcp_pass is None or vcp_pass:
+            return True
+
+        if ticker not in self._vcp_logged:
+            self._vcp_logged.add(ticker)
+            logger.info(
+                "entry_vcp_filter",
+                ticker=ticker,
+                name=self._name(ticker),
+                market=self._market,
+                mode=mode,
+                reason=getattr(signals, "vcp_reason", ""),
+                blocked=(mode == "enforce"),
+                msg=(
+                    "VCP 미충족 — enforce: 진입 차단"
+                    if mode == "enforce"
+                    else "VCP 미충족 — shadow: 진입은 허용(관찰만)"
+                ),
+            )
+        return mode != "enforce"
 
     async def _ai_report_gate_allows_entry(self, ticker: str) -> bool:
         settings = get_settings()
