@@ -375,11 +375,17 @@ class PreMarketPreparer:
                     "pre_market_signal_error", ticker=ticker, market=market,
                 )
 
+        vcp_true = sum(1 for s in signals if s.vcp_pass is True)
+        vcp_false = sum(1 for s in signals if s.vcp_pass is False)
         logger.info(
             "pre_market_signals_computed",
             market=market,
             total=len(all_tickers),
             success=len(signals),
+            vcp_pass=vcp_true,
+            vcp_fail=vcp_false,
+            vcp_unevaluated=len(signals) - vcp_true - vcp_false,
+            vcp_fail_tickers=[s.ticker for s in signals if s.vcp_pass is False][:10],
         )
         return signals
 
@@ -478,6 +484,24 @@ class PreMarketPreparer:
                         last_unit.entry_price, n_value,
                     )
 
+        # VCP 평가 — 실패/데이터부족 시 None으로 남겨 게이트가 기존 동작을 유지한다.
+        vcp_pass: bool | None = None
+        vcp_reason = ""
+        try:
+            from strategy.vcp import check_vcp
+
+            vcp_res = check_vcp(
+                highs,
+                lows,
+                [bar.close for bar in bars],
+                [bar.volume for bar in bars],
+            )
+            if vcp_res["evaluable"]:
+                vcp_pass = vcp_res["vcp"]
+                vcp_reason = vcp_res["reason"]
+        except Exception:
+            logger.exception("pre_market_vcp_error", ticker=ticker, market=market)
+
         signal = PrecomputedSignals(
             ticker=ticker,
             n_value=n_value,
@@ -486,6 +510,8 @@ class PreMarketPreparer:
             s2_entry_price=donchian.upper_55,
             stop_price=stop_price,
             pyramid_price=pyramid_price,
+            vcp_pass=vcp_pass,
+            vcp_reason=vcp_reason,
         )
 
         return signal

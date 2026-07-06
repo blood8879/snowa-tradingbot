@@ -283,6 +283,10 @@ class PrecomputedSignals:
     # Market filter
     market_filter_pass: bool = False
 
+    # VCP entry filter (None = 미평가/평가불가 → 게이트는 기존 동작 유지)
+    vcp_pass: Optional[bool] = None
+    vcp_reason: str = ""
+
 
 @dataclass
 class DailyLog:
